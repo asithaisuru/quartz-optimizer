@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.pyc
+venv/
+env/
+.env
+
+# --- Node / Frontend ---
+node_modules/
+dist/
+.DS_Store
+
+# --- Heavy Data (DO NOT UPLOAD) ---
+jobs/
+dataset/
+training_runs/
+data/
+*.mp4
+*.ply
+*.obj
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+
+# --- Models  ---
+# models/

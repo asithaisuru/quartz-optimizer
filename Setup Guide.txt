@@ -1,0 +1,58 @@
+Setup Guide
+
+01. install 
+	
+	miniconda (https://www.anaconda.com/download) 
+	meshlab (https://www.meshlab.net/#download)  
+	colmap (https://github.com/colmap/colmap/releases) // i got 3.13
+
+02. In CMD (run line by line)
+
+	```` // if you do not have a enviorenment setup
+
+		conda create -n quartz python=3.10 -y 	
+
+	````
+		conda activate quartz
+
+	````
+
+		pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
+	````
+
+		pip install ultralytics==8.2.103 opencv-python numpy scipy plyfile trimesh open3d fastapi uvicorn python-multipart aiofiles shapely
+
+	````
+
+		pip install rq redis
+
+	````
+
+03. Verify PyTorch + GPU works: You should see True and your GPU name.
+
+	````
+		python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+	
+	````
+
+04. Run unicorn server: (in conda cmd navigate to the project folder(backend) then run the below code. This should be running to acess backend)
+	
+	````
+		uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+	````
+
+05. Setup frontend (this should be running to access frontend).
+	navigate to web/frontend
+	do an 
+	```
+		npm i
+
+	```
+	make the .env file acording to the example.
+	then 
+	````
+		npm run dev
+
+	````
