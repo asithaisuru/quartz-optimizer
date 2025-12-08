@@ -1,4 +1,3 @@
-
 # 💎 Quartz Gemstone Optimizer
 
 **An Automated Computer Vision Pipeline for 3D Reconstruction & Fracture Analysis.**
@@ -12,11 +11,11 @@ This system provides an end-to-end workflow for transforming raw video footage o
 
 ## ✨ Key Features
 
-*   **Seamless Pipeline:** Upload video $\rightarrow$ 3D Model (One click).
+*   **Seamless Pipeline:** Upload video -> 3D Model (One click).
 *   **Multi-Mode Scanning:**
     *   **🔄 Turntable Mode:** Uses AI (`rembg`) to remove backgrounds automatically. Best for gemstones.
     *   **📷 Handheld Mode:** Uses environmental features for tracking. Best for larger objects.
-*   **Robust Photogrammetry:** Intelligent fallback system (Dense $\rightarrow$ Sparse) ensures a model is always generated.
+*   **Robust Photogrammetry:** Intelligent fallback system (Dense -> Sparse) ensures a model is always generated.
 *   **3D Visualization:** Interactive WebGL viewer with studio lighting, infinite rotation, and "X-Ray" point cloud modes.
 *   **Queue System:** Background processing with real-time status updates via WebSockets/Polling.
 
@@ -53,8 +52,14 @@ It is recommended to use a virtual environment to avoid version conflicts.
 conda create -n quartz python=3.10 -y
 conda activate quartz
 
-# Install dependencies
-# Note: This installs specific versions of numpy/opencv to avoid conflicts
+# 1. Install RTree (Must be done via Conda for Windows C++ binaries)
+conda install -c conda-forge rtree
+
+# 2. Install PyTorch (Specific Nightly Build for RTX 5050 / CUDA 12.6+)
+pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu126
+
+# 3. Install remaining dependencies
+# (Numpy will be locked to 1.26.4 to ensure YOLO compatibility)
 pip install -r requirements.txt
 ```
 
@@ -127,6 +132,8 @@ quartz-optimizer/
 │   ├── colmap_runner.py    # Photogrammetry Automation
 │   ├── cleanup_module.py   # Open3D Mesh Processing & Texturing
 │   ├── video_utils.py      # Frame Extraction Logic
+│   ├── optimizer.py        # Yield Optimization & Cut Planning
+│   ├── yield_calculator.py # Volume & Weight Analysis
 │   └── masking_utils.py    # AI Background Removal
 │
 ├── web/frontend/           # React Vite App

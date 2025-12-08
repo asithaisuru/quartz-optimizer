@@ -11,6 +11,9 @@ function App() {
   const [jobId, setJobId] = useState(null);
   const [statusData, setStatusData] = useState({ step: '', progress: 0, message: '' });
   const [modelUrl, setModelUrl] = useState(null);
+  const [reportUrl, setReportUrl] = useState(null);
+  const [weight, setWeight] = useState(null);
+  const [cutUrl, setCutUrl] = useState(null);
 
   // Updated handler accepting (files, mode)
   const handleFileSelect = async (files, mode) => {
@@ -18,21 +21,27 @@ function App() {
 
     setAppState('processing');
     const formData = new FormData();
-    
+
     for (let i = 0; i < files.length; i++) {
       formData.append("files", files[i]);
     }
-    
+
+    // --- FIX: DETECT ALL VIDEO FORMATS ---
     let hasVideo = false;
+    const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
+
     for (let i = 0; i < files.length; i++) {
-        if (files[i].name.toLowerCase().endsWith('.mp4')) hasVideo = true;
+      const name = files[i].name.toLowerCase();
+      if (videoExtensions.some(ext => name.endsWith(ext))) {
+        hasVideo = true;
+      }
     }
-    
+    // -------------------------------------
+
     formData.append("is_video", hasVideo ? "true" : "false");
-    
-    // --- SEND MODE ---
-    formData.append("scan_mode", mode); 
-    // -----------------
+    formData.append("scan_mode", mode);
+
+    if (weight) formData.append("known_weight", weight);
 
     try {
       const res = await axios.post(`${API_URL}/upload`, formData);
@@ -85,6 +94,7 @@ function App() {
 
         if (data.status === "Completed") {
           setModelUrl(data.model_url);
+          if (data.report_url) setReportUrl(data.report_url);
           setAppState('completed');
           if (interval) clearInterval(interval);
         } else if (data.status === "Failed") {
@@ -113,6 +123,7 @@ function App() {
         <UploadArea
           onFileSelect={handleFileSelect}
           onRecoverJob={handleRecoverJob}
+          onWeightChange={setWeight}
           loading={false}
         />
       )}
@@ -130,7 +141,7 @@ function App() {
       )}
 
       {appState === 'completed' && modelUrl && (
-        <ResultDashboard modelUrl={modelUrl} jobId={jobId} />
+        <ResultDashboard modelUrl={modelUrl} reportUrl={reportUrl} jobId={jobId} />
       )}
 
     </div>
