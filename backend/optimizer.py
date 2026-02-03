@@ -2,70 +2,106 @@ import trimesh
 import numpy as np
 import os
 import copy
+import concurrent.futures
+from functools import partial
 from gem_shapes import get_standard_shapes
 
-def check_fit_proximity(prox, gem, start_point, min_dim, max_dim):
-    # Move gem to start point
-    gem_curr = gem.copy()
-    gem_curr.vertices += start_point 
+# Allow gem to use 99.5% of the available space (almost touching)
+SAFETY_FACTOR = 0.995
+MIN_VOLUME_RATIO = 0.02 
+
+def get_exact_max_scale(rough, gem, position, min_dim, max_dim, obstacles):
+    """
+    Uses Binary Search to find the EXACT limit before the gem touches a wall.
+    This guarantees the largest possible gem size.
+    """
+    test_gem = gem.copy()
+    test_gem.vertices += position
     
-    scale = min_dim * 0.05 # Start at 5%
-    step_size = min_dim * 0.02
-    best_scale = 0.0
+    # Range to search
+    low = 0.0
+    high = max_dim
+    best_valid_scale = 0.0
     
-    # RELATIVE TOLERANCE: 1% of the stone's smallest side
-    # This adapts to huge stones (1000cts) and tiny stones (1ct)
-    tolerance = min_dim * 0.01 
-    
-    for _ in range(100):
-        if scale > max_dim: break
+    # 15 steps of binary search = high precision
+    for _ in range(15):
+        mid = (low + high) / 2.0
         
-        test_gem = gem_curr.copy()
-        test_gem.apply_scale(scale)
+        # Scale locally at center of gem
+        candidate = test_gem.copy()
+        candidate.vertices -= candidate.bounds.mean(axis=0) # zero center
+        candidate.apply_scale(mid)
+        candidate.vertices += position + test_gem.bounds.mean(axis=0) # move back
         
+        # 1. Obstacle Check
+        collision = False
+        if obstacles:
+            c_mgr = trimesh.collision.CollisionManager()
+            c_mgr.add_object('new', candidate)
+            for i, obs in enumerate(obstacles):
+                c_mgr.add_object(str(i), obs)
+            if c_mgr.in_collision_internal():
+                collision = True
+        
+        if collision:
+            high = mid # Hit neighbor, try smaller
+            continue
+            
         try:
-            # Check distance
-            sdf = prox.signed_distance(test_gem.vertices)
+            # 2. Wall Check (Ray Casting is most accurate)
+            # contains_points returns array of True/False
+            # All vertices must be True (Inside)
+            is_inside = rough.contains(candidate.vertices)
             
-            # Allow points to be slightly outside based on relative tolerance
-            inside_mask = sdf < tolerance
-            fraction_inside = np.mean(inside_mask)
-            
-            # Relaxed Rule: 90% inside
-            if fraction_inside > 0.90:
-                best_scale = scale
-                scale += step_size
+            if np.all(is_inside):
+                best_valid_scale = mid
+                low = mid # Fits! Try bigger.
             else:
-                break
+                high = mid # Hit wall! Try smaller.
         except:
-            break
-            
-    return best_scale
+            high = mid
 
-def optimize_cut(rough_mesh_path):
-    print(f"--- Running Geometric Optimization (Guaranteed Mode) ---")
+    return best_valid_scale
+
+# --- MULTI-THREAD WORKER ---
+def worker_check_rot(args):
+    """Checks grid for ONE rotation on ONE shape"""
+    (rot, search_points, rough_V, rough_F, obstacles_V, obstacles_F, gem_V, gem_F, min_dim, max_dim) = args
     
-    try:
-        rough = trimesh.load(rough_mesh_path)
-    except:
-        return [{"shape": "Error", "max_volume_cm3": 0, "score": 0}]
+    # Rehydrate
+    rough = trimesh.Trimesh(vertices=rough_V, faces=rough_F)
+    obstacles = [trimesh.Trimesh(vertices=v, faces=f) for v, f in zip(obstacles_V, obstacles_F)]
+    base_gem = trimesh.Trimesh(vertices=gem_V, faces=gem_F)
+    base_gem.apply_transform(rot)
+    
+    best_scale = 0.0
+    best_pos = None
+    
+    for pos in search_points:
+        scale = get_exact_max_scale(rough, base_gem, pos, min_dim, max_dim, obstacles)
+        
+        if scale > best_scale:
+            best_scale = scale
+            best_pos = pos
+            
+    return best_scale, best_pos, rot
 
-    if hasattr(rough, 'convex_hull'): rough = rough.convex_hull
+def optimize_cut(rough_mesh_path, mode="multi", progress_callback=None):
+    print(f"--- Running Geometric Optimization (Binary Search Max-Size) ---")
+    
+    try: rough = trimesh.load(rough_mesh_path)
+    except: return []
 
-    # Calculate Grid
+    # Center to 0
+    rough.vertices -= rough.bounds.mean(axis=0)
+    
     extents = rough.extents
     min_dim = np.min(extents)
     max_dim = np.max(extents)
     
-    # Create Proximity Engine
-    try:
-        prox = trimesh.proximity.ProximityQuery(rough)
-    except:
-        print("❌ Proximity failed. Using Fallback.")
-        prox = None
-
+    # 7-Point Search
+    offset = np.max(extents) * 0.15
     center = np.array([0.0, 0.0, 0.0])
-    offset = max_dim * 0.1
     search_points = [
         center,
         center + [offset, 0, 0], center - [offset, 0, 0],
@@ -74,69 +110,99 @@ def optimize_cut(rough_mesh_path):
     ]
 
     shapes = get_standard_shapes()
-    results = []
     
-    global_best_vol = 0.0
-    global_best_mesh = None
+    # Rotations (Identity, 90s)
+    rotations = [np.eye(4)]
+    for axis in [[1,0,0],[0,1,0],[0,0,1]]:
+        rotations.append(trimesh.transformations.rotation_matrix(np.pi/2, axis))
 
-    for name, gem_template in shapes.items():
-        gem_template.vertices -= gem_template.centroid
+    strategies = []
+    
+    def find_gem(existing_obstacles):
+        # Pack data for threads
+        obs_V = [m.vertices for m in existing_obstacles]
+        obs_F = [m.faces for m in existing_obstacles]
         
-        shape_best_vol = 0.0
-        shape_best_mesh = None
+        tasks = []
+        for name, tmpl in shapes.items():
+            tmpl.vertices -= tmpl.bounds.mean(axis=0) # Zero
+            for rot in rotations:
+                tasks.append({
+                    "name": name,
+                    "args": (rot, search_points, rough.vertices, rough.faces, obs_V, obs_F, tmpl.vertices, tmpl.faces, min_dim, max_dim)
+                })
+
+        global_best = {"vol": 0, "gem": None, "name": ""}
         
-        rotations = [
-            np.eye(4),
-            trimesh.transformations.rotation_matrix(np.pi/2, [1,0,0]),
-            trimesh.transformations.rotation_matrix(np.pi/2, [0,1,0])
-        ]
-        
-        for rot in rotations:
-            rotated_gem = gem_template.copy()
-            rotated_gem.apply_transform(rot)
+        # Parallel Execution
+        total = len(tasks)
+        processed = 0
+        if progress_callback: progress_callback(0, total, "Scanning volume...")
+
+        # max_threads = os.cpu_count() or 4
+        max_threads = os.cpu_count() or 16 # Fallback to 24 if detection fails
+        print(f"   🔥 Processing {total_tasks} fit-tests on {max_threads} CORES...")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_threads) as executor:
+            futures = {executor.submit(worker_check_rot, t["args"]): t["name"] for t in tasks}
             
-            # Try Grid Search
-            if prox:
-                for point in search_points:
-                    scale = check_fit_proximity(prox, rotated_gem, point, min_dim, max_dim)
+            for f in concurrent.futures.as_completed(futures):
+                name = futures[f]
+                processed += 1
+                
+                scale, pos, rot = f.result()
+                if scale > 0:
+                    gem_t = shapes[name].copy()
+                    gem_t.vertices -= gem_t.bounds.mean(axis=0)
+                    gem_t.apply_transform(rot)
+                    gem_t.vertices += pos
+                    gem_t.apply_scale(scale * SAFETY_FACTOR)
                     
-                    if scale > 0:
-                        final_gem = rotated_gem.copy()
-                        final_gem.vertices += point
-                        final_gem.apply_scale(scale)
-                        
-                        if final_gem.volume > shape_best_vol:
-                            shape_best_vol = final_gem.volume
-                            shape_best_mesh = final_gem
+                    if gem_t.volume > global_best["vol"]:
+                        global_best["vol"] = gem_t.volume
+                        global_best["gem"] = gem_t
+                        global_best["name"] = name
+        
+        return global_best["gem"], global_best["vol"], global_best["name"]
 
-        # --- SAFETY NET: FORCE A RESULT ---
-        # If optimization returned 0 (math failed), assume a safe 30% size fit.
-        # This guarantees the red gem appears and is not 0 cts.
-        status = "Optimized"
-        if shape_best_vol == 0:
-            print(f"   ⚠️ Optimization 0 for {name}. Forcing Safety Fit.")
-            safe_scale = min_dim * 0.30 # 30% of width
-            
-            shape_best_mesh = gem_template.copy()
-            shape_best_mesh.apply_scale(safe_scale) # Scale
-            # No rotation/translation (assume center is safest)
-            
-            shape_best_vol = shape_best_mesh.volume
-            status = "Fallback (Safety Net)"
+    # STEP 1
+    gem1, vol1, name1 = find_gem([])
+    
+    if not gem1:
+        name1 = list(shapes.keys())[0] + " (Fallback)"
+        gem1 = shapes[list(shapes.keys())[0]].copy()
+        gem1.apply_scale(min_dim * 0.25)
+        gem1.vertices -= gem1.bounds.mean(axis=0)
+        vol1 = gem1.volume
 
-        if shape_best_vol > global_best_vol:
-            global_best_vol = shape_best_vol
-            global_best_mesh = shape_best_mesh
+    strategies.append({
+        "strategy": "Single Large",
+        "shape": name1,
+        "gems": [gem1],
+        "total_volume": vol1
+    })
 
-        results.append({ "shape": name, "max_volume_cm3": shape_best_vol, "score": shape_best_vol, "status": status })
-        print(f"   Tested {name}: Vol {shape_best_vol:.3f} - {status}")
+    # STEP 2
+    if mode == "multi":
+        gem2, vol2, name2 = find_gem([gem1])
+        if gem2 and vol2 > (rough.volume * MIN_VOLUME_RATIO):
+             strategies.append({
+                "strategy": "Multi-Gem",
+                "shape": f"{name1} + {name2}",
+                "gems": [gem1, gem2],
+                "total_volume": vol1 + vol2
+            })
 
-    # SAVE
-    if global_best_mesh:
-        save_path = rough_mesh_path.replace("final_textured_model_scaled.ply", "best_cut.ply")
-        global_best_mesh.visual.face_colors = [255, 0, 0, 255]
-        global_best_mesh.export(save_path)
-        print(f"   💎 Saved Best Cut: {os.path.basename(save_path)}")
+    strategies.sort(key=lambda x: x['total_volume'], reverse=True)
+    winner = strategies[0]
+    
+    # Save
+    out = os.path.dirname(rough_mesh_path)
+    combined = trimesh.util.concatenate(winner['gems'])
+    combined.visual.face_colors = [255, 0, 0, 255]
+    combined.export(os.path.join(out, "best_cut.ply"))
+    
+    return strategies
 
-    results.sort(key=lambda x: x['score'], reverse=True)
-    return results
+if __name__ == '__main__':
+    # Need this safeguard for multiprocessing on Windows
+    pass

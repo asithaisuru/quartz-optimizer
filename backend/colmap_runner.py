@@ -34,6 +34,7 @@ def run_command(cmd, verbose=True):
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode != 0:
         print(f"Warning: Command failed: {cmd_str}")
+        print("STDERR:", result.stderr) 
         return False
     if verbose: print("Done.")
     return True
@@ -55,7 +56,6 @@ def get_largest_sparse_model(sparse_dir):
                 best_folder = folder
     return best_folder
 
-# --- UPDATED FUNCTION SIGNATURE ---
 def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
     images_dir = os.path.join(job_path, "images")
     database_path = os.path.join(job_path, "database.db")
@@ -67,24 +67,24 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
 
     print(f"=== Starting Photogrammetry | Mode: {scan_mode} ===")
 
-    # --- CONFIGURE SETTINGS BASED ON MODE ---
-    if scan_mode == "turntable":
-        # EXTREME SENSITIVITY (For Transparent/Shiny Gems)
-        feat_threshold = "0.00001" # Find invisible dust
-        cam_model = "SIMPLE_RADIAL" # Better for rotation distortion
-        match_overlap = "40"       # High overlap for smooth video
-        stereo_window = "7"        # Detailed depth
-    else:
-        # STANDARD SENSITIVITY (For Handheld/Rooms)
-        feat_threshold = "0.01"    # Ignore noise, focus on strong features
-        cam_model = "PINHOLE"      # Standard model, faster
-        match_overlap = "20"       # Standard video overlap
-        stereo_window = "11"       # Smoother depth (less noise)
-    # ----------------------------------------
+    # --- CONFIGURATION (SAFE MODE) ---
+    # We removed explicit GPU flags because they were breaking the command.
+    # COLMAP will auto-detect GPU.
     
+    if scan_mode == "turntable":
+        # Ultra High Sensitivity for gems
+        feat_threshold = "0.0001"  
+        cam_model = "SIMPLE_RADIAL"
+        stereo_window = "7" 
+    else:
+        # Standard
+        feat_threshold = "0.01"    
+        cam_model = "PINHOLE"
+        stereo_window = "11"       
+
     # 1. Feature Extraction
     if not os.path.exists(database_path):
-        update_status(job_path, "Feature Extraction", 10, f"Extracting ({scan_mode})...")
+        update_status(job_path, "Feature Extraction", 10, f"Extracting features...")
         run_command([
             COLMAP_BIN, "feature_extractor", 
             "--database_path", database_path, 
@@ -92,16 +92,27 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
             "--ImageReader.camera_model", cam_model, 
             "--ImageReader.single_camera", "1", 
             "--SiftExtraction.peak_threshold", feat_threshold
+            # Removed bad GPU flags
         ])
 
-    # 2. Matching
-    update_status(job_path, "Matching", 25, "Matching video frames...")
-    run_command([
-        COLMAP_BIN, "sequential_matcher", 
-        "--database_path", database_path,
-        "--SequentialMatching.overlap", match_overlap, 
-        "--SequentialMatching.loop_detection", "1"
-    ])
+    # 2. Matching (CRITICAL FIX: CLEAN COMMAND)
+    update_status(job_path, "Matching", 25, "Matching frames...")
+    
+    if scan_mode == "turntable":
+        # Exhaustive Matcher is best for flips, but can be heavy.
+        # We lowered block size to 20 to prevent memory crashes on consumer GPUs.
+        run_command([
+            COLMAP_BIN, "exhaustive_matcher", 
+            "--database_path", database_path,
+            "--ExhaustiveMatching.block_size", "20"
+        ])
+    else:
+        # Sequential Matcher for continuous video
+        run_command([
+            COLMAP_BIN, "sequential_matcher", 
+            "--database_path", database_path,
+            "--SequentialMatching.overlap", "20"
+        ])
 
     # 3. Sparse Reconstruction
     if not os.listdir(sparse_dir):
@@ -110,13 +121,24 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
             COLMAP_BIN, "mapper", 
             "--database_path", database_path, 
             "--image_path", images_dir, 
-            "--output_path", sparse_dir,
-            "--Mapper.ba_global_function_tolerance", "0.000001"
+            "--output_path", sparse_dir
         ])
 
     best_model_id = get_largest_sparse_model(sparse_dir)
+    
+    # Hierarchical Fallback if standard Mapper fails
     if not best_model_id:
-        raise Exception("Sparse reconstruction failed.")
+        print("   ⚠️ Standard Mapper failed. Trying Hierarchical Mapper...")
+        run_command([
+            COLMAP_BIN, "hierarchical_mapper",
+            "--database_path", database_path, 
+            "--image_path", images_dir, 
+            "--output_path", sparse_dir
+        ])
+        best_model_id = get_largest_sparse_model(sparse_dir)
+        
+    if not best_model_id:
+        raise Exception("Sparse reconstruction failed. Not enough overlapping features.")
     
     input_sparse_path = os.path.join(sparse_dir, best_model_id)
 
@@ -140,6 +162,7 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
         "--PatchMatchStereo.geom_consistency", "true", 
         "--PatchMatchStereo.window_radius", stereo_window,
         "--PatchMatchStereo.min_ncc", "0.05"
+        # Removed GPU index flag (Auto detect)
     ])
 
     # 6. Stereo Fusion
@@ -155,7 +178,7 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
         "--StereoFusion.min_num_pixels", "5"
     ])
 
-    # === FALLBACK ===
+    # 7. Final Fallback (Sparse to PLY)
     is_empty = False
     if not os.path.exists(fused_ply_path): is_empty = True
     elif os.path.getsize(fused_ply_path) < 5000: is_empty = True
@@ -172,7 +195,3 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
 
     update_status(job_path, "Completed", 100, "Done.")
     return fused_ply_path
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        run_photogrammetry_pipeline(sys.argv[1])

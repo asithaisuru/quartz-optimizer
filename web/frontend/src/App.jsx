@@ -4,44 +4,39 @@ import UploadArea from './components/UploadArea';
 import PipelineHUD from './components/PipelineHUD';
 import ResultDashboard from './components/ResultDashboard';
 
-const API_URL = "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 function App() {
-  const [appState, setAppState] = useState('idle');
+  const [appState, setAppState] = useState('idle'); 
   const [jobId, setJobId] = useState(null);
   const [statusData, setStatusData] = useState({ step: '', progress: 0, message: '' });
+  
   const [modelUrl, setModelUrl] = useState(null);
   const [reportUrl, setReportUrl] = useState(null);
-  const [weight, setWeight] = useState(null);
   const [cutUrl, setCutUrl] = useState(null);
+  const [defectsUrl, setDefectsUrl] = useState(null); // <--- NEW STATE
 
-  // Updated handler accepting (files, mode)
   const handleFileSelect = async (files, mode) => {
     if (!files || files.length === 0) return;
 
     setAppState('processing');
     const formData = new FormData();
-
+    
     for (let i = 0; i < files.length; i++) {
       formData.append("files", files[i]);
     }
-
-    // --- FIX: DETECT ALL VIDEO FORMATS ---
+    
     let hasVideo = false;
     const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
-
     for (let i = 0; i < files.length; i++) {
-      const name = files[i].name.toLowerCase();
-      if (videoExtensions.some(ext => name.endsWith(ext))) {
-        hasVideo = true;
-      }
+        const name = files[i].name.toLowerCase();
+        if (videoExtensions.some(ext => name.endsWith(ext))) {
+            hasVideo = true;
+        }
     }
-    // -------------------------------------
-
+    
     formData.append("is_video", hasVideo ? "true" : "false");
-    formData.append("scan_mode", mode);
-
-    if (weight) formData.append("known_weight", weight);
+    formData.append("scan_mode", mode); 
 
     try {
       const res = await axios.post(`${API_URL}/upload`, formData);
@@ -59,20 +54,16 @@ function App() {
     setAppState('processing');
   };
 
-  // --- NEW: CANCEL HANDLER ---
   const handleCancel = async () => {
     if (!jobId) return;
     if (confirm("Are you sure you want to stop the analysis?")) {
-      try {
-        await axios.post(`${API_URL}/jobs/${jobId}/cancel`);
-        setAppState('idle');
-        setJobId(null);
-      } catch (err) {
-        console.error("Cancel failed", err);
-      }
+        try {
+            await axios.post(`${API_URL}/jobs/${jobId}/cancel`);
+        } catch (err) {
+            console.error("Cancel failed", err);
+        }
     }
   };
-  // ---------------------------
 
   useEffect(() => {
     let interval;
@@ -85,7 +76,7 @@ function App() {
       try {
         const res = await axios.get(`${API_URL}/jobs/${jobId}/status`);
         const data = res.data;
-
+        
         setStatusData({
           step: data.step,
           progress: data.progress,
@@ -95,18 +86,31 @@ function App() {
         if (data.status === "Completed") {
           setModelUrl(data.model_url);
           if (data.report_url) setReportUrl(data.report_url);
+          if (data.cut_url) setCutUrl(data.cut_url);
+          
+          // --- CAPTURE DEFECTS URL ---
+          if (data.defects_url) setDefectsUrl(data.defects_url);
+          // ---------------------------
+
           setAppState('completed');
           if (interval) clearInterval(interval);
+        
         } else if (data.status === "Failed") {
           alert("Job Failed: " + data.message);
           setAppState('idle');
           if (interval) clearInterval(interval);
+        
         } else if (data.status === "Cancelled") {
-          // Explicitly tell the user what happened
-          alert(`Job ${jobId} was cancelled.`);
-          setAppState('idle');
-          setJobId(null); // Clear the ID so they can search again
-          if (interval) clearInterval(interval);
+            alert(`Job ${jobId} was cancelled/aborted.`);
+            setAppState('idle');
+            setJobId(null);
+            if (interval) clearInterval(interval);
+        
+        } else if (data.status === "Not Found") {
+            alert("Job ID not found on server.");
+            setAppState('idle');
+            setJobId(null);
+            if (interval) clearInterval(interval);
         }
       } catch (err) {
         console.error(err);
@@ -118,32 +122,36 @@ function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-cyan-500/30">
-
+      
       {appState === 'idle' && (
-        <UploadArea
-          onFileSelect={handleFileSelect}
-          onRecoverJob={handleRecoverJob}
-          onWeightChange={setWeight}
-          loading={false}
+        <UploadArea 
+          onFileSelect={handleFileSelect} 
+          onRecoverJob={handleRecoverJob} 
+          loading={false} 
         />
       )}
 
       {appState === 'processing' && (
         <div className="flex flex-col items-center justify-center h-screen">
-          <PipelineHUD
-            currentStep={statusData.step}
-            progress={statusData.progress}
+          <PipelineHUD 
+            currentStep={statusData.step} 
+            progress={statusData.progress} 
             message={statusData.message}
             jobId={jobId}
-            onCancel={handleCancel} // Pass function
+            onCancel={handleCancel}
           />
         </div>
       )}
 
       {appState === 'completed' && modelUrl && (
-        <ResultDashboard modelUrl={modelUrl} reportUrl={reportUrl} jobId={jobId} />
+        <ResultDashboard 
+            modelUrl={modelUrl} 
+            reportUrl={reportUrl} 
+            cutUrl={cutUrl}
+            defectsUrl={defectsUrl} // <--- Pass it down
+        />
       )}
-
+      
     </div>
   );
 }

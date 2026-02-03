@@ -5,6 +5,9 @@ venv/
 env/
 .env
 
+# --- Backend  ---
+backend/temp_plots
+
 # --- Node / Frontend ---
 node_modules/
 dist/
@@ -25,3 +28,4 @@ data/
 
 # --- Models  ---
 # models/
+dataset_prep/
