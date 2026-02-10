@@ -8,7 +8,7 @@ def get_sharpness(image):
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 # UPDATED: Accepts start_index to prevent overwriting frames
-def extract_best_frames(video_path, output_folder, target_frames=100, start_index=0):
+def extract_best_frames(video_path, output_folder, target_frames=40, start_index=0):
     print(f"--- Extracting frames from: {os.path.basename(video_path)} (Start ID: {start_index}) ---")
     os.makedirs(output_folder, exist_ok=True)
     

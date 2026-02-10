@@ -2,9 +2,6 @@ import os
 import sys
 import site
 
-# --- WINDOWS GPU FIX ---
-# This forces Python to look inside the PyTorch folder for the missing DLLs
-# (cublasLt64_12.dll, etc.) before loading the AI.
 try:
     # 1. Find where 'site-packages' is (where pip installs things)
     # Usually: C:\Users\Asitha\miniconda3\envs\quartz\Lib\site-packages

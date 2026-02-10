@@ -73,7 +73,7 @@ def process_full_pipeline(job_id: str, job_folder: str, is_video: bool, scan_mod
             idx = 0
             for vid in video_files:
                 check_if_cancelled(job_folder)
-                cnt = extract_best_frames(os.path.join(job_folder, vid), images_folder, target_frames=80, start_index=idx)
+                cnt = extract_best_frames(os.path.join(job_folder, vid), images_folder, target_frames=40, start_index=idx)
                 total += cnt
                 idx += cnt
             if total < 10: raise Exception("Video extraction failed.")

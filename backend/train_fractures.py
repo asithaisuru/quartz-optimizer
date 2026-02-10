@@ -20,7 +20,6 @@ def run_training():
     # 1. Verification
     if not os.path.exists(DATASET_YAML):
         print("❌ ERROR: Could not find 'dataset/data.yaml'")
-        print("   Did you unzip the Roboflow file into D:\\project-quartz\\dataset ?")
         return
 
     # 2. Load Base Model
@@ -38,22 +37,20 @@ def run_training():
             data=DATASET_YAML,
             epochs=100,           # Number of training cycles (100 is standard)
             imgsz=640,            # Image size
-            batch=8,              # Batch size (If you get Out Of Memory error, change to 4)
+            batch=8,              # Batch size (If get Out Of Memory error, change to 4)
             device='cpu',             # GPU Index
             project=OUTPUT_DIR,   # Where to save the output
-            name="quartz_fracture_v1", # Name of this run
+            name="quartz_fracture_v1", # Name of the run
             exist_ok=True         # Overwrite if we run it again
         )
         
         print("\n========================================")
         print("✅ TRAINING COMPLETE!")
         print(f"   Best Model Saved: {os.path.join(OUTPUT_DIR, 'quartz_fracture_v1', 'weights', 'best.pt')}")
-        print("   Action: Copy this file to 'backend/best.pt' to use it.")
         print("========================================")
         
     except Exception as e:
         print(f"\n❌ Training Failed: {e}")
-        print("   Tip: If it says 'CUDA Out of memory', change 'batch=8' to 'batch=4' in the code.")
 
 if __name__ == '__main__':
     # Required for Windows multiprocessing

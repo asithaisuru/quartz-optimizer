@@ -114,7 +114,7 @@ export default function ResultDashboard({ modelUrl, reportUrl, cutUrl, defectsUr
     }
   };
 
-  // --- DEFINITIONS (Must be before return) ---
+  // --- DYNAMIC DATA ---
   const isOptimized = data && data.yield_percent !== 35;
   const barColor = isOptimized ? "bg-purple-500" : "bg-cyan-400";
   
@@ -122,14 +122,13 @@ export default function ResultDashboard({ modelUrl, reportUrl, cutUrl, defectsUr
   const currentWeight = selectedOption ? selectedOption.weight : (data ? data.estimated_cut_carats : 0);
   const currentShape = selectedOption ? selectedOption.name : "Custom";
   
-  const currentLightScore = selectedOption ? selectedOption.light_score : (data?.light_analysis?.score ?? 0);
-  const currentLightGrade = selectedOption ? selectedOption.light_grade : (data?.light_analysis?.grade ?? "N/A");
+  // Use Option score if available, else Global score, else 0
+  const currentLightScore = selectedOption?.light_score ?? (data?.light_analysis?.score ?? 0);
+  const currentLightGrade = selectedOption?.light_grade ?? (data?.light_analysis?.grade ?? "N/A");
+  // NEW: Dimensions preference (Option > Global > Zeros)
+  const currentDims = selectedOption?.cut_dims ?? (data?.cut_dimensions_mm ?? [0,0,0]);
   
-  // FIX: Ensure yieldText is defined here
-  const yieldText = isOptimized 
-    ? `AI Optimized: ${data.recommended_shape || "Custom Cut"}` 
-    : "Based on 35% standard yield";
-  // ------------------------------------------
+  const roughDims = data?.rough_dimensions_mm ?? [0,0,0];
 
   return (
     <div className="h-screen w-full flex overflow-hidden">
@@ -169,7 +168,13 @@ export default function ResultDashboard({ modelUrl, reportUrl, cutUrl, defectsUr
           {isEditing ? (
             <div className="mt-2">
                 <div className="flex items-center gap-2">
-                    <input type="number" className="w-24 bg-black/40 border border-emerald-500/50 rounded px-2 py-1 text-xl text-white font-bold outline-none focus:border-emerald-400" autoFocus defaultValue={data ? data.raw_carats : ""} onChange={(e) => setTempWeight(e.target.value)} />
+                    <input 
+                        type="number" 
+                        className="w-24 bg-black/40 border border-emerald-500/50 rounded px-2 py-1 text-xl text-white font-bold outline-none focus:border-emerald-400"
+                        autoFocus
+                        defaultValue={data ? data.raw_carats : ""}
+                        onChange={(e) => setTempWeight(e.target.value)}
+                    />
                     <span className="text-sm text-slate-400">cts</span>
                     
                     <div className="ml-auto flex gap-2">
@@ -194,23 +199,26 @@ export default function ResultDashboard({ modelUrl, reportUrl, cutUrl, defectsUr
                 </button>
             </div>
           )}
-          <p className="text-xs text-emerald-300/70 mt-2 border-t border-emerald-500/20 pt-2">Est. Volume: {data ? data.volume_cm3 : "..."} cm³</p>
+          <p className="text-xs text-emerald-300/70 mt-2 border-t border-emerald-500/20 pt-2 flex justify-between">
+              <span>Vol: {data ? data.volume_cm3 : 0} cm³</span>
+              <span>Rough: {roughDims[0]} mm</span>
+          </p>
         </div>
 
-        {/* STRATEGIES */}
+        {/* OPTIONS LIST */}
         {data && data.options && (
             <div className="space-y-2">
-                <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Select Cut Strategy</h3>
+                <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Select Strategy</h3>
                 <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1">
                     {data.options.map((opt, idx) => (
                         <button key={idx} onClick={() => handleSelectOption(opt)} className={`flex items-center justify-between p-3 rounded-lg border transition-all text-left group ${selectedOption === opt ? 'bg-purple-500/10 border-purple-500/50 shadow-lg' : 'bg-slate-800 border-slate-700 hover:border-slate-600'}`}>
                             <div>
                                 <div className={`font-semibold text-sm ${selectedOption === opt ? 'text-white' : 'text-slate-300'}`}>{opt.name}</div>
-                                <div className="text-[10px] text-slate-500 flex gap-2">{opt.type} {opt.status === "Fallback" && <span className="text-red-400 font-bold">⚠️ Safety Fit</span>}</div>
+                                <div className="text-[10px] text-slate-500 flex gap-2">{opt.type} {opt.status === "Fallback" && <span className="text-red-400 font-bold">⚠️ Safety</span>}</div>
                             </div>
                             <div className="text-right">
                                 <div className="font-mono font-bold text-emerald-400">{opt.weight} ct</div>
-                                <div className="text-[10px] text-slate-500">{opt.light_score}/100 Light</div>
+                                <div className="text-[10px] text-slate-500">{opt.light_score > 0 ? `${opt.light_score} Brilliance` : `${opt.yield}% Yield`}</div>
                             </div>
                         </button>
                     ))}
@@ -218,8 +226,8 @@ export default function ResultDashboard({ modelUrl, reportUrl, cutUrl, defectsUr
             </div>
         )}
 
-        {/* STATS */}
         <div className="space-y-4">
+          {/* CUT WEIGHT */}
           <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
@@ -232,25 +240,31 @@ export default function ResultDashboard({ modelUrl, reportUrl, cutUrl, defectsUr
                 <div className={`${barColor} h-full`} style={{width: `${Math.min(currentYield, 100)}%`}}></div>
             </div>
             <div className="flex justify-between items-center mt-2">
-                <p className="text-[10px] text-slate-500">{yieldText}</p>
+                <p className="text-[10px] text-slate-500">{currentShape}</p>
                 <p className={`text-xs font-bold ${isOptimized ? "text-purple-400" : "text-cyan-400"}`}>{currentYield}% Yield</p>
             </div>
           </div>
 
+          {/* LIGHT PERFORMANCE CARD */}
           <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
              <div className="flex items-center gap-2 mb-3"><SunDim className="w-4 h-4 text-yellow-400" /><span className="text-slate-300">Light Performance</span></div>
              <div className="flex justify-between items-end">
                 <div><div className="text-3xl font-bold text-white">{currentLightScore}</div><div className="text-[10px] text-slate-500">Brilliance Score</div></div>
                 <div className="px-3 py-1 rounded-full bg-slate-900 border border-slate-600 text-xs font-mono text-cyan-400">{currentLightGrade}</div>
              </div>
+             {/* Simple Bar */}
+             <div className="w-full bg-slate-900 h-1 mt-3 rounded-full overflow-hidden">
+                <div className="bg-yellow-400 h-full transition-all duration-1000" style={{width: `${currentLightScore}%`}}></div>
+             </div>
           </div>
 
+          {/* DIMENSIONS CARD */}
           <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
-             <div className="flex items-center gap-2 mb-3"><Layers className="w-4 h-4 text-purple-400" /><span className="text-slate-300">Dimensions</span></div>
+             <div className="flex items-center gap-2 mb-3"><Layers className="w-4 h-4 text-purple-400" /><span className="text-slate-300">Gem Dimensions</span></div>
              <div className="grid grid-cols-3 gap-2 text-center">
-                <div className="bg-slate-900 rounded p-2"><div className="text-xs text-slate-500">L</div><div className="font-mono text-white">{data?.dimensions_mm?.[0] ?? "-"}</div></div>
-                <div className="bg-slate-900 rounded p-2"><div className="text-xs text-slate-500">W</div><div className="font-mono text-white">{data?.dimensions_mm?.[1] ?? "-"}</div></div>
-                <div className="bg-slate-900 rounded p-2"><div className="text-xs text-slate-500">H</div><div className="font-mono text-white">{data?.dimensions_mm?.[2] ?? "-"}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-xs text-slate-500">L</div><div className="font-mono text-white">{currentDims[0]}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-xs text-slate-500">W</div><div className="font-mono text-white">{currentDims[1]}</div></div>
+                <div className="bg-slate-900 rounded p-2"><div className="text-xs text-slate-500">H</div><div className="font-mono text-white">{currentDims[2]}</div></div>
              </div>
              <p className="text-[10px] text-slate-500 mt-2 text-center">Measurements in mm</p>
           </div>

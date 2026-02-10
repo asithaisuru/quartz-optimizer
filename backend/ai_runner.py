@@ -5,7 +5,7 @@ import numpy as np
 from ultralytics import YOLO
 import torch
 
-# Path to your trained model
+# Path to trained model
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
