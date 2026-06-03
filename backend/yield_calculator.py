@@ -3,100 +3,132 @@ import numpy as np
 import json
 import os
 from optimizer import optimize_cut
+from ray_tracer import calculate_light_performance
 
-DENSITY_QUARTZ = 2.65
+DENSITY_QUARTZ = 2.65   # g/cm³
 CARATS_PER_GRAM = 5.0
 
-def calculate_gem_stats(mesh_path, known_carats=None, progress_callback=None):
-    if not os.path.exists(mesh_path): return {"error": "Mesh not found"}
+
+def calculate_gem_stats(
+    mesh_path,
+    known_carats=None,
+    preferred_shape=None,
+    cut_mode="multi",
+    job_folder=None,
+    progress_callback=None
+):
+    """
+    Parameters
+    ----------
+    mesh_path       : str   - path to the rough stone PLY (final_textured_model.ply)
+    known_carats    : str   - user-provided carat weight (optional)
+    preferred_shape : str   - gem shape name chosen by user (None = auto)
+    cut_mode        : str   - "single" or "multi"
+    job_folder      : str   - job root folder (used to locate defects.ply)
+    progress_callback: callable(current, total, message)
+    """
+    if not os.path.exists(mesh_path):
+        return {"error": "Mesh not found"}
 
     try:
-        # 1. Load & Center Rough
+        # --- Load & center rough stone ---
         mesh = trimesh.load(mesh_path)
-        center = mesh.bounds.mean(axis=0)
-        mesh.apply_translation(-center)
-        
+        mesh.apply_translation(-mesh.bounds.mean(axis=0))
+
+        # Save the centered stone for the 3D viewer
         aligned_path = mesh_path.replace("final_textured_model.ply", "visual_aligned_stone.ply")
         mesh.export(aligned_path)
 
-        if not mesh.is_watertight: vol_mesh = mesh.convex_hull
-        else: vol_mesh = mesh
+        vol_mesh = mesh if mesh.is_watertight else mesh.convex_hull
+        vol_original = vol_mesh.volume
 
-        # 2. Scale Logic (Based on Rough)
-        vol_original_arbitrary = vol_mesh.volume
-        scale_factor = 1.0
-        target_weight_carats = 0.0
-        
+        # --- Scale calibration ---
         if known_carats and float(known_carats) > 0:
-            target_weight_carats = float(known_carats)
-            target_grams = target_weight_carats / CARATS_PER_GRAM
-            target_vol_cm3 = target_grams / DENSITY_QUARTZ
-            
-            if vol_original_arbitrary > 0:
-                scale_factor = (target_vol_cm3 / vol_original_arbitrary) ** (1/3)
+            target_weight = float(known_carats)
+            target_grams = target_weight / CARATS_PER_GRAM
+            target_vol = target_grams / DENSITY_QUARTZ
+            scale_factor = (target_vol / vol_original) ** (1 / 3)
         else:
             scale_factor = 2.0 / np.max(vol_mesh.extents)
-            target_vol_cm3 = vol_original_arbitrary * (scale_factor ** 3)
-            target_weight_carats = target_vol_cm3 * DENSITY_QUARTZ * CARATS_PER_GRAM
+            target_vol = vol_original * (scale_factor ** 3)
+            target_weight = target_vol * DENSITY_QUARTZ * CARATS_PER_GRAM
 
-        # 3. Calculate ROUGH Dimensions
-        # These help the user check if their weight input was correct
-        rough_dims_mm = vol_mesh.extents * scale_factor * 10 
-
-        # 4. Optimize
-        optimizer_mesh = mesh.copy() 
+        # Export unscaled mesh for optimizer (optimizer works in mesh units)
         temp_opt_path = mesh_path.replace(".ply", "_opt_input.ply")
-        optimizer_mesh.export(temp_opt_path)
-        
-        strategies = optimize_cut(temp_opt_path, mode="multi", progress_callback=progress_callback)
-        
+        mesh.export(temp_opt_path)
+
+        # --- Run optimizer ---
+        # Pass preferred_shape, cut_mode, and job_folder so the optimizer can:
+        #   a) filter to the user's chosen shape
+        #   b) run single or multi-gem packing
+        #   c) load defects.ply and avoid fractures
+        strategies = optimize_cut(
+            temp_opt_path,
+            mode=cut_mode,
+            preferred_shape=preferred_shape,
+            job_folder=job_folder,
+            progress_callback=progress_callback
+        )
+
         options_data = []
         for i, strat in enumerate(strategies):
             plan_vol = strat['total_volume']
-            yield_ratio = plan_vol / vol_original_arbitrary if vol_original_arbitrary > 0 else 0
-            plan_weight = target_weight_carats * yield_ratio
+            yield_ratio = plan_vol / vol_original if vol_original > 0 else 0
+            plan_weight = target_weight * yield_ratio
             yield_pct = yield_ratio * 100
-            
-            # --- NEW: Calculate Cut Dimensions ---
-            # We take the first/largest gem in the strategy
-            main_gem = strat['gems'][0]
-            # Extents * Scale Factor * 10 (cm to mm)
-            cut_dims = main_gem.extents * scale_factor * 10
-            # -------------------------------------
-            
+
+            # Save this option's PLY
             opt_filename = f"option_{i}.ply"
-            opt_full_path = os.path.join(os.path.dirname(mesh_path), opt_filename)
-            combined_mesh = trimesh.util.concatenate(strat['gems'])
-            combined_mesh.visual.face_colors = [255, 0, 0, 255]
-            combined_mesh.export(opt_full_path)
-            
+            opt_path = os.path.join(os.path.dirname(mesh_path), opt_filename)
+            combined = trimesh.util.concatenate(strat['gems'])
+            combined.visual.face_colors = [255, 0, 0, 255]
+            combined.export(opt_path)
+
+            # Dimensions of the cut gem (scaled to real mm)
+            cut_extents_mm = [
+                round(float(e) * scale_factor * 10, 2)
+                for e in combined.extents
+            ]
+
+            # Light performance
+            light = calculate_light_performance(opt_path)
+
             options_data.append({
                 "name": strat['shape'],
                 "type": strat['strategy'],
                 "weight": round(plan_weight, 2),
                 "yield": round(yield_pct, 1),
                 "file": opt_filename,
-                # Store specific dimensions for this cut
-                "cut_dims": [round(x, 2) for x in cut_dims]
+                "light_score": light['score'],
+                "light_grade": light['grade'],
+                "cut_dims": cut_extents_mm,
+                # Number of gems in this strategy
+                "gem_count": len(strat['gems'])
             })
 
-        best = options_data[0] if options_data else None
+        best = options_data[0]
+
+        # Rough stone dimensions in mm
+        rough_extents_mm = [round(float(e) * scale_factor * 10, 2) for e in vol_mesh.extents]
 
         stats = {
-            "volume_cm3": round(target_weight_carats / CARATS_PER_GRAM / DENSITY_QUARTZ, 2),
-            "raw_carats": round(target_weight_carats, 2),
-            # Return Rough Dims separately
-            "rough_dimensions_mm": [round(x, 2) for x in rough_dims_mm], 
-            
-            # Best Option Stats
-            "estimated_cut_carats": best['weight'] if best else 0,
-            "yield_percent": best['yield'] if best else 0,
-            "recommended_shape": best['name'] if best else "None",
-            "cut_dimensions_mm": best['cut_dims'] if best else [0,0,0], # The winning gem size
-            "options": options_data
+            "volume_cm3": round(target_weight / CARATS_PER_GRAM / DENSITY_QUARTZ, 2),
+            "rough_dimensions_mm": rough_extents_mm,
+            "raw_carats": round(target_weight, 2),
+            "estimated_cut_carats": best['weight'],
+            "yield_percent": best['yield'],
+            "recommended_shape": best['name'],
+            "cut_mode": cut_mode,
+            "preferred_shape": preferred_shape or "Auto",
+            "options": options_data,
+            "light_analysis": {
+                "score": best['light_score'],
+                "grade": best['light_grade']
+            }
         }
         return stats
 
     except Exception as e:
-        print(f"❌ Calculation failed: {e}")
+        import traceback
+        traceback.print_exc()
         return {"error": str(e)}

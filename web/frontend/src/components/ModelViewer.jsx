@@ -1,6 +1,6 @@
 import React, { Suspense, useState, useLayoutEffect } from 'react';
 import { Canvas, useLoader, useFrame } from '@react-three/fiber';
-import { TrackballControls, ContactShadows, Environment } from '@react-three/drei'; // REMOVED Center
+import { TrackballControls, ContactShadows, Environment } from '@react-three/drei';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader';
 import { Sun, Box, Grid } from 'lucide-react';
 import * as THREE from 'three';
@@ -32,13 +32,16 @@ function CutGem({ url, showWireframe }) {
   return (
     <group>
       {/* 
-         NO ROTATION, NO POSITION. 
-         We assume the backend 'best_cut.ply' has the vertices burned into the correct XYZ spots.
+         FIXED: Added the same rotation as the RoughStone so it fits perfectly inside!
       */}
-      <mesh geometry={geometry}>
+      <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]}>
         <meshStandardMaterial color="#ff0055" roughness={0.1} metalness={0.8} />
       </mesh>
-      {showWireframe && <mesh geometry={geometry}><meshBasicMaterial color="#ffff00" wireframe={true} transparent={true} opacity={0.8} /></mesh>}
+      {showWireframe && (
+        <mesh geometry={geometry} rotation={[-Math.PI / 2, 0, 0]}>
+          <meshBasicMaterial color="#ffff00" wireframe={true} transparent={true} opacity={0.8} />
+        </mesh>
+      )}
     </group>
   );
 }
@@ -58,13 +61,13 @@ function AutoSpinner({ isSpinning }) {
 export default function ModelViewer({ modelUrl, cutUrl }) {
   const [isAutoRotating, setIsAutoRotating] = useState(true);
   const [brightness, setBrightness] = useState(1.0);
-  const [showCut, setShowCut] = useState(true);
+  const[showCut, setShowCut] = useState(true);
   const [showWireframe, setShowWireframe] = useState(false);
 
   return (
     <div className="w-full h-full bg-gradient-to-b from-slate-900 to-black relative group">
       
-      {/* Controls UI ... (Same as before) ... */}
+      {/* Controls UI */}
       <div className="absolute top-6 right-6 z-20 flex flex-col gap-2">
         {cutUrl && (
             <button onClick={() => setShowCut(!showCut)} className="flex items-center gap-2 px-4 py-2 bg-slate-800/80 backdrop-blur border border-slate-600 rounded-lg text-white hover:bg-cyan-600 transition-colors shadow-lg">
@@ -76,7 +79,7 @@ export default function ModelViewer({ modelUrl, cutUrl }) {
         </button>
       </div>
       
-      {/* Brightness UI ... (Same as before) ... */}
+      {/* Brightness UI */}
       <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 z-20 flex items-center gap-4 bg-slate-900/80 backdrop-blur-md px-6 py-3 rounded-2xl border border-slate-700 shadow-2xl transition-opacity duration-300 opacity-0 group-hover:opacity-100">
         <Sun className="w-5 h-5 text-yellow-400" />
         <input type="range" min="0.2" max="3.0" step="0.1" value={brightness} onChange={(e) => setBrightness(parseFloat(e.target.value))} className="w-48 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-400" />
@@ -89,11 +92,7 @@ export default function ModelViewer({ modelUrl, cutUrl }) {
           <directionalLight position={[0, -10, -10]} intensity={2.0 * brightness} />
           <Environment preset="studio" />
 
-          {/* 
-              REMOVED <Center>. 
-              Instead, we create a Group at (0,0,0) and let the files determine alignment.
-              This respects the "Shared Coordinate System".
-          */}
+          {/* Group at (0,0,0) so files determine alignment */}
           <group position={[0,0,0]}>
              <RoughStone url={modelUrl} isXRay={showCut && cutUrl} showWireframe={showWireframe} />
              {showCut && cutUrl && <CutGem url={cutUrl} showWireframe={showWireframe} />}
