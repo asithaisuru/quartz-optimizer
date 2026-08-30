@@ -1,17 +1,25 @@
 import React, { useState, useEffect } from 'react';
-import { UploadCloud, Search, Camera, RefreshCw, Scale, Gem, Layers, Maximize2 } from 'lucide-react';
+import { UploadCloud, Search, Camera, RefreshCw, Scale, Gem, Layers, Maximize2, ChevronDown, ChevronUp, Video, SlidersHorizontal } from 'lucide-react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export default function UploadArea({ onFileSelect, onRecoverJob }) {
-  const [manualId,    setManualId]    = useState("");
-  const [isDragging,  setIsDragging]  = useState(false);
-  const [scanMode,    setScanMode]    = useState('turntable');
-  const [knownWeight, setKnownWeight] = useState("");
-  const [cutMode,     setCutMode]     = useState("multi");      // "single" | "multi"
-  const [shapes,      setShapes]      = useState([]);           // from /shapes API
-  const [selectedShape, setSelectedShape] = useState("");       // "" = auto
+  const [manualId,      setManualId]      = useState("");
+  const [isDragging,    setIsDragging]    = useState(false);
+  const [scanMode,      setScanMode]      = useState('turntable');
+  const [knownWeight,   setKnownWeight]   = useState("");
+  const [cutMode,       setCutMode]       = useState("multi");
+  const [shapes,        setShapes]        = useState([]);
+  const [selectedShape, setSelectedShape] = useState("");
+  const [guideOpen,     setGuideOpen]     = useState(false);
+  const [bladeKerfMm,   setBladeKerfMm]   = useState("0.5");
+  const [roughInsetMm,  setRoughInsetMm]  = useState("0.8");
+  const [preformMarginMm, setPreformMarginMm] = useState("");
+  const [maxCutDepthMm, setMaxCutDepthMm] = useState("");
+  const [maxGems,       setMaxGems]       = useState("12");
+  const [minGemCarat,   setMinGemCarat]   = useState("0.5");
+  const [settingsError, setSettingsError] = useState("");
 
   // Fetch available gem shapes from backend on mount
   useEffect(() => {
@@ -33,12 +41,39 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
   const handleInput = (e) => submit(e.target.files);
 
   const submit = (files) => {
+    if (cutMode === "multi") {
+      const margin = Number(preformMarginMm);
+      const depth = Number(maxCutDepthMm);
+      const inset = Number(roughInsetMm);
+      if (!preformMarginMm || !Number.isFinite(margin) || margin <= 0 || margin > 5) {
+        setSettingsError("Enter a preform allowance between 0 and 5 mm.");
+        return;
+      }
+      if (!maxCutDepthMm || !Number.isFinite(depth) || depth <= 0 || depth > 500) {
+        setSettingsError("Enter the saw's maximum usable depth between 0 and 500 mm.");
+        return;
+      }
+      if (!Number.isFinite(inset) || inset < margin) {
+        setSettingsError("Rough inset must be at least the preform allowance.");
+        return;
+      }
+    }
+    setSettingsError("");
     onFileSelect(
       files,
       scanMode,
       knownWeight || null,
       selectedShape || null,
-      cutMode
+      cutMode,
+      {
+        blade_kerf_mm: bladeKerfMm,
+        rough_clearance_mm: roughInsetMm,
+        preform_margin_mm: cutMode === "multi" ? preformMarginMm : null,
+        max_cut_depth_mm: cutMode === "multi" ? maxCutDepthMm : null,
+        max_gems: maxGems,
+        min_secondary_carat: minGemCarat,
+        extra_gem_policy: "saleable",
+      }
     );
   };
 
@@ -151,6 +186,157 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
             </button>
           </div>
         </div>
+
+        {/* OPTIMIZER SETTINGS */}
+        <div className="bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-3 backdrop-blur-md">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="bg-slate-800 p-2 rounded-lg text-amber-400">
+              <SlidersHorizontal className="w-4 h-4" />
+            </div>
+            <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+              Optimizer Settings
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <label className="block">
+              <span className="block text-[10px] text-slate-500 uppercase font-bold mb-1">Blade Gap</span>
+              <input
+                type="number"
+                min="0.2"
+                max="2"
+                step="0.1"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white font-mono outline-none focus:border-amber-400"
+                value={bladeKerfMm}
+                onChange={(e) => setBladeKerfMm(e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-slate-500 uppercase font-bold mb-1">Preform mm</span>
+              <input
+                type="number"
+                min="0.01"
+                max="5"
+                step="0.1"
+                required={cutMode === "multi"}
+                placeholder={cutMode === "multi" ? "Required" : "N/A"}
+                disabled={cutMode !== "multi"}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white font-mono outline-none focus:border-amber-400 disabled:opacity-40"
+                value={preformMarginMm}
+                onChange={(e) => setPreformMarginMm(e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-slate-500 uppercase font-bold mb-1">Max Depth</span>
+              <input
+                type="number"
+                min="0.01"
+                max="500"
+                step="0.1"
+                required={cutMode === "multi"}
+                placeholder={cutMode === "multi" ? "Required" : "N/A"}
+                disabled={cutMode !== "multi"}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white font-mono outline-none focus:border-amber-400 disabled:opacity-40"
+                value={maxCutDepthMm}
+                onChange={(e) => setMaxCutDepthMm(e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-slate-500 uppercase font-bold mb-1">Inset</span>
+              <input
+                type="number"
+                min="0.2"
+                max="5"
+                step="0.1"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white font-mono outline-none focus:border-amber-400"
+                value={roughInsetMm}
+                onChange={(e) => setRoughInsetMm(e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-slate-500 uppercase font-bold mb-1">Max Gems</span>
+              <input
+                type="number"
+                min="1"
+                max="20"
+                step="1"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white font-mono outline-none focus:border-amber-400"
+                value={maxGems}
+                onChange={(e) => setMaxGems(e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] text-slate-500 uppercase font-bold mb-1">Min Ct</span>
+              <input
+                type="number"
+                min="0.1"
+                max="10"
+                step="0.1"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-white font-mono outline-none focus:border-amber-400"
+                value={minGemCarat}
+                onChange={(e) => setMinGemCarat(e.target.value)}
+              />
+            </label>
+          </div>
+          {settingsError && (
+            <p className="mt-3 text-xs text-red-400" role="alert">{settingsError}</p>
+          )}
+        </div>
+      </div>
+
+      {/* RECORDING GUIDE */}
+      <div className="w-full max-w-3xl relative z-10 mb-3">
+        <button
+          onClick={() => setGuideOpen(v => !v)}
+          className="flex items-center gap-2 w-full px-4 py-2.5 rounded-xl bg-slate-900/60 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-500/50 transition-all text-sm"
+        >
+          <Video className="w-4 h-4 text-cyan-500" />
+          <span className="font-medium">How to record your 4 videos</span>
+          <span className="ml-auto">
+            {guideOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </span>
+        </button>
+
+        {guideOpen && (
+          <div className="mt-1 p-4 bg-slate-900/80 border border-slate-700 rounded-xl text-sm space-y-3 backdrop-blur-md">
+            <p className="text-slate-400 text-xs uppercase font-bold tracking-wider">
+              Turntable setup — 4 videos required
+            </p>
+            <div className="space-y-2">
+              {/* Normal position — 2 videos */}
+              <div className="bg-slate-800/70 rounded-lg p-3 border border-cyan-500/20">
+                <p className="text-cyan-400 font-bold text-xs mb-2">Gem in normal position (right-side up)</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase font-bold">Video 1</span>
+                    <p className="text-slate-300 text-xs mt-0.5">Camera at 0° — level with the gem. One full turntable rotation.</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase font-bold">Video 2</span>
+                    <p className="text-slate-300 text-xs mt-0.5">Camera at 45° — angled down. One full turntable rotation.</p>
+                  </div>
+                </div>
+              </div>
+              {/* Flipped position — 2 videos */}
+              <div className="bg-slate-800/70 rounded-lg p-3 border border-purple-500/20">
+                <p className="text-purple-400 font-bold text-xs mb-2">Flip gem upside down</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase font-bold">Video 3</span>
+                    <p className="text-slate-300 text-xs mt-0.5">Camera at 0° — level with the gem. One full turntable rotation.</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase font-bold">Video 4</span>
+                    <p className="text-slate-300 text-xs mt-0.5">Camera at 45° — angled down. One full turntable rotation.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-start gap-2 text-xs text-slate-500 border-t border-slate-700 pt-3">
+              <span className="text-yellow-400 mt-0.5">★</span>
+              <span>Keep lighting consistent across all videos. Slow, steady turntable rotation gives the sharpest frames for COLMAP reconstruction.</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* DROP ZONE */}
@@ -177,10 +363,10 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
               <UploadCloud className="w-10 h-10" />
             </div>
             <p className="mb-1 text-xl text-slate-200 font-medium">
-              Drop up to 4 videos here
+              Drop your 4 videos here
             </p>
             <p className="text-sm text-slate-500">
-              45° · Side · Upside-down · 0° angle
+              2× at 0° (normal) · 2× at 45° (gem flipped)
             </p>
             <p className="text-xs text-slate-600 mt-1">
               {scanMode === 'turntable'

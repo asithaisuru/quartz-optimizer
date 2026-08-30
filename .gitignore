@@ -29,3 +29,26 @@ data/
 # --- Models  ---
 # models/
 dataset_prep/
+
+/reports
+/.playwright-mcp
+/DOC
+
+# Generated research evidence. Compact final summaries may be archived
+# deliberately after research-team review.
+/research_evidence/runs/
+/final_research_evidence
+/research/**
+/research_evidence/**
+/thesis/**
+/tmp/**
+/thesis**
+/research_evidence.zip
+/FINAL_THESIS_EVIDENCE_AUDIT.md
+/web/backup/
+/web/FE_backup.zip
+.agents
+.claude
+/FINAL_THESIS_JOURNAL_HANDOFF.md
+/backend.zip
+/yolo26n.pt
