@@ -8,7 +8,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import colmap_runner  # noqa: E402
 
 
-COLMAP_313_FEATURE_HELP = """
+COLMAP_411_FEATURE_HELP = """
+  --FeatureExtraction.use_gpu arg (=1)
+  --FeatureExtraction.gpu_index arg (=-1)
+  --FeatureExtraction.max_image_size arg (=-1)
+  --SiftExtraction.max_num_features arg (=8192)
+  --SiftExtraction.peak_threshold arg (=0.00667)
+"""
+
+COLMAP_LEGACY_FEATURE_HELP = """
   --FeatureExtraction.use_gpu arg (=1)
   --FeatureExtraction.gpu_index arg (=-1)
   --SiftExtraction.max_image_size arg (=3200)
@@ -20,17 +28,63 @@ COLMAP_313_MATCHER_HELP = """
   --SiftMatching.cpu_brute_force_matcher arg (=0)
 """
 
+COLMAP_411_PATCH_MATCH_HELP = """
+  --PatchMatchStereo.gpu_index arg (=-1)
+  --PatchMatchStereo.geom_consistency arg (=1)
+"""
+
 
 def fake_help(command):
     if command == "feature_extractor":
-        return COLMAP_313_FEATURE_HELP
+        return COLMAP_411_FEATURE_HELP
     if command == "exhaustive_matcher":
         return COLMAP_313_MATCHER_HELP
+    if command == "patch_match_stereo":
+        return COLMAP_411_PATCH_MATCH_HELP
     return ""
 
 
 class ColmapRunnerGpuFlagTests(unittest.TestCase):
-    def test_cpu_mode_emits_colmap_313_no_gpu_flags_for_sift_stages(self):
+    def test_default_local_colmap_411_path_is_preferred_before_path(self):
+        old_path = r"D:\colmap\bin\colmap.exe"
+        resolved = colmap_runner._resolve_colmap_bin(
+            env={},
+            which=lambda name: old_path if name == "colmap" else None,
+            isfile=lambda path: path == colmap_runner.DEFAULT_COLMAP_BIN,
+        )
+        self.assertEqual(resolved, colmap_runner.DEFAULT_COLMAP_BIN)
+
+    def test_configured_colmap_path_overrides_default(self):
+        configured = r"E:\tools\colmap\colmap.exe"
+        resolved = colmap_runner._resolve_colmap_bin(
+            env={colmap_runner.COLMAP_BIN_ENV: configured},
+            which=lambda name: None,
+            isfile=lambda path: path == configured,
+        )
+        self.assertEqual(resolved, configured)
+
+    def test_missing_configured_colmap_path_does_not_fall_back_silently(self):
+        configured = r"Z:\missing\colmap.exe"
+        resolved = colmap_runner._resolve_colmap_bin(
+            env={colmap_runner.COLMAP_BIN_ENV: configured},
+            which=lambda name: r"D:\colmap-new\bin\colmap.exe",
+            isfile=lambda path: path != configured,
+        )
+        self.assertEqual(resolved, configured)
+
+    def test_missing_colmap_binary_fails_clearly(self):
+        with (
+            patch.object(colmap_runner, "COLMAP_BIN", r"Z:\missing\colmap.exe"),
+            patch.object(colmap_runner.os.path, "isfile", return_value=False),
+            patch.object(colmap_runner.shutil, "which", return_value=None),
+        ):
+            with self.assertRaises(FileNotFoundError) as err:
+                colmap_runner._ensure_colmap_available()
+
+        self.assertIn("COLMAP executable not found", str(err.exception))
+        self.assertIn(colmap_runner.COLMAP_BIN_ENV, str(err.exception))
+
+    def test_cpu_mode_emits_colmap_411_no_gpu_flags_for_sift_stages(self):
         with (
             patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
             patch.object(colmap_runner, "_HAS_CUDA", False),
@@ -43,6 +97,11 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         matcher_flag = matcher_cmd.index("--FeatureMatching.use_gpu")
         self.assertEqual(feature_cmd[feature_flag + 1], "0")
         self.assertEqual(matcher_cmd[matcher_flag + 1], "0")
+        image_size_flag = feature_cmd.index("--FeatureExtraction.max_image_size")
+        self.assertEqual(feature_cmd[image_size_flag + 1], "1200")
+        self.assertNotIn("--SiftExtraction.max_image_size", feature_cmd)
+        self.assertIn("--SiftExtraction.max_num_features", feature_cmd)
+        self.assertIn("--SiftExtraction.peak_threshold", feature_cmd)
 
     def test_gpu_mode_preserves_colmap_gpu_flags_for_sift_stages(self):
         with (
@@ -57,6 +116,48 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         matcher_flag = matcher_cmd.index("--FeatureMatching.use_gpu")
         self.assertEqual(feature_cmd[feature_flag + 1], "1")
         self.assertEqual(matcher_cmd[matcher_flag + 1], "1")
+
+    def test_feature_image_size_falls_back_to_legacy_sift_option(self):
+        def legacy_help(command):
+            if command == "feature_extractor":
+                return COLMAP_LEGACY_FEATURE_HELP
+            return fake_help(command)
+
+        with (
+            patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
+            patch.object(colmap_runner, "_HAS_CUDA", False),
+            patch.object(colmap_runner, "_colmap_command_help", side_effect=legacy_help),
+        ):
+            feature_cmd = colmap_runner._feature_extractor_command("db.db", "images")
+
+        image_size_flag = feature_cmd.index("--SiftExtraction.max_image_size")
+        self.assertEqual(feature_cmd[image_size_flag + 1], "1200")
+        self.assertNotIn("--FeatureExtraction.max_image_size", feature_cmd)
+
+    def test_feature_image_size_option_must_be_supported(self):
+        with (
+            patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
+            patch.object(colmap_runner, "_HAS_CUDA", False),
+            patch.object(colmap_runner, "_colmap_command_help", return_value=""),
+        ):
+            with self.assertRaises(RuntimeError) as err:
+                colmap_runner._feature_extractor_command("db.db", "images")
+
+        self.assertIn("feature_extractor", str(err.exception))
+        self.assertIn("max_image_size", str(err.exception))
+
+    def test_patch_match_uses_gpu_index_zero_when_supported(self):
+        with (
+            patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
+            patch.object(colmap_runner, "_colmap_command_help", side_effect=fake_help),
+        ):
+            cmd = colmap_runner._patch_match_stereo_command("dense")
+
+        flag = cmd.index("--PatchMatchStereo.gpu_index")
+        self.assertEqual(cmd[flag + 1], "0")
+        self.assertIn("--PatchMatchStereo.geom_consistency", cmd)
+        self.assertIn("--PatchMatchStereo.window_radius", cmd)
+        self.assertIn("--PatchMatchStereo.num_iterations", cmd)
 
     def test_cuda_setup_errors_are_classified_separately(self):
         self.assertTrue(

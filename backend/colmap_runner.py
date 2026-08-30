@@ -5,13 +5,57 @@ import time
 import shutil
 import torch
 
-COLMAP_BIN = shutil.which("colmap")
-if not COLMAP_BIN:
-    default_path = r"C:\Program Files\COLMAP\colmap.exe"
-    if os.path.exists(default_path):
-        COLMAP_BIN = default_path
-    else:
-        COLMAP_BIN = "colmap"
+COLMAP_BIN_ENV = "QUARTZ_COLMAP_BIN"
+DEFAULT_COLMAP_BIN = r"D:\colmap-new\bin\colmap.exe"
+
+
+def _clean_executable_path(path):
+    return os.path.expandvars(os.path.expanduser(str(path).strip().strip('"')))
+
+
+def _resolve_colmap_bin(env=None, which=shutil.which, isfile=os.path.isfile):
+    env = os.environ if env is None else env
+    configured = env.get(COLMAP_BIN_ENV)
+    if configured:
+        configured = _clean_executable_path(configured)
+        if os.path.isabs(configured):
+            return configured
+        return which(configured) or configured
+
+    candidates = []
+    candidates.append(DEFAULT_COLMAP_BIN)
+
+    path_colmap = which("colmap")
+    if path_colmap:
+        candidates.append(path_colmap)
+
+    for candidate in candidates:
+        candidate = _clean_executable_path(candidate)
+        if os.path.isabs(candidate):
+            if isfile(candidate):
+                return candidate
+        else:
+            resolved = which(candidate)
+            if resolved:
+                return resolved
+
+    return _clean_executable_path(configured or DEFAULT_COLMAP_BIN)
+
+
+COLMAP_BIN = _resolve_colmap_bin()
+
+
+def _ensure_colmap_available():
+    if os.path.isabs(COLMAP_BIN) and os.path.isfile(COLMAP_BIN):
+        return COLMAP_BIN
+    if not os.path.isabs(COLMAP_BIN):
+        resolved = shutil.which(COLMAP_BIN)
+        if resolved:
+            return resolved
+    raise FileNotFoundError(
+        f"COLMAP executable not found: {COLMAP_BIN}. "
+        f"Set {COLMAP_BIN_ENV} to a valid colmap.exe path."
+    )
 
 # Detect CUDA once at import time.
 # torch.cuda.is_available() returns True even when the GPU's compute capability
@@ -42,18 +86,58 @@ def _pytorch_cuda_works():
 _HAS_CUDA, _GPU_NAME = _pytorch_cuda_works()
 
 _COLMAP_HELP_CACHE = {}
+_COLMAP_VERSION_CACHE = {}
 
 
 def _colmap_command_help(command):
-    if command not in _COLMAP_HELP_CACHE:
+    cache_key = (COLMAP_BIN, command)
+    if cache_key not in _COLMAP_HELP_CACHE:
+        colmap_bin = _ensure_colmap_available()
         result = subprocess.run(
-            [COLMAP_BIN, command, "-h"],
+            [colmap_bin, command, "-h"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        _COLMAP_HELP_CACHE[command] = f"{result.stdout}\n{result.stderr}"
-    return _COLMAP_HELP_CACHE[command]
+        _COLMAP_HELP_CACHE[cache_key] = f"{result.stdout}\n{result.stderr}"
+    return _COLMAP_HELP_CACHE[cache_key]
+
+
+def _colmap_version_line():
+    if COLMAP_BIN not in _COLMAP_VERSION_CACHE:
+        colmap_bin = _ensure_colmap_available()
+        result = subprocess.run(
+            [colmap_bin, "-h"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        text = f"{result.stdout}\n{result.stderr}"
+        version = next(
+            (line.strip() for line in text.splitlines()
+            if line.strip().startswith("COLMAP ")),
+            "COLMAP version unavailable",
+        )
+        _COLMAP_VERSION_CACHE[COLMAP_BIN] = version
+    return _COLMAP_VERSION_CACHE[COLMAP_BIN]
+
+
+def _supported_colmap_option(command, candidates):
+    help_text = _colmap_command_help(command)
+    for flag in candidates:
+        if flag in help_text:
+            return flag
+    return None
+
+
+def _colmap_option_value(command, candidates, value):
+    flag = _supported_colmap_option(command, candidates)
+    if not flag:
+        raise RuntimeError(
+            f"COLMAP {command} does not support any expected option: "
+            f"{', '.join(candidates)}"
+        )
+    return [flag, value]
 
 
 def _supported_gpu_use_flag(command):
@@ -67,11 +151,7 @@ def _supported_gpu_use_flag(command):
             "--SiftMatching.use_gpu",
         ),
     }.get(command, ())
-    help_text = _colmap_command_help(command)
-    for flag in candidates:
-        if flag in help_text:
-            return flag
-    return None
+    return _supported_colmap_option(command, candidates)
 
 
 def _colmap_gpu_options(command):
@@ -89,7 +169,14 @@ def _feature_extractor_command(database_path, images_dir):
         "--ImageReader.camera_model", "SIMPLE_RADIAL",
         "--ImageReader.single_camera", "1",
         *_colmap_gpu_options("feature_extractor"),
-        "--SiftExtraction.max_image_size", "1200",
+        *_colmap_option_value(
+            "feature_extractor",
+            (
+                "--FeatureExtraction.max_image_size",
+                "--SiftExtraction.max_image_size",
+            ),
+            "1200",
+        ),
         "--SiftExtraction.max_num_features", "4096",
         "--SiftExtraction.peak_threshold", "0.004",
     ]
@@ -102,6 +189,20 @@ def _exhaustive_matcher_command(database_path):
         *_colmap_gpu_options("exhaustive_matcher"),
         "--ExhaustiveMatching.block_size", "50",
     ]
+
+
+def _patch_match_stereo_command(dense_dir):
+    cmd = [
+        COLMAP_BIN, "patch_match_stereo",
+        "--workspace_path", dense_dir,
+        "--workspace_format", "COLMAP",
+        "--PatchMatchStereo.geom_consistency", "true",
+        "--PatchMatchStereo.window_radius", "5",
+        "--PatchMatchStereo.num_iterations", "5",
+    ]
+    if "--PatchMatchStereo.gpu_index" in _colmap_command_help("patch_match_stereo"):
+        cmd.extend(["--PatchMatchStereo.gpu_index", "0"])
+    return cmd
 
 
 def _looks_like_cuda_setup_failure(stderr):
@@ -178,6 +279,8 @@ def get_largest_sparse_model(sparse_dir):
 
 
 def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
+    colmap_bin = _ensure_colmap_available()
+    colmap_version = _colmap_version_line()
     images_dir   = os.path.join(job_path, "images")
     database_path = os.path.join(job_path, "database.db")
     sparse_dir   = os.path.join(job_path, "sparse")
@@ -193,7 +296,9 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
     print(f"=== COLMAP Photogrammetry Pipeline")
     print(f"    Mode      : {scan_mode}")
     print(f"    Images    : {n_images}")
-    print(f"    GPU       : {'YES — ' + _GPU_NAME if _HAS_CUDA else 'NO (CPU only)'}")
+    print(f"    COLMAP    : {colmap_version}")
+    print(f"    COLMAP exe: {colmap_bin}")
+    print(f"    PyTorch GPU: {'YES - ' + _GPU_NAME if _HAS_CUDA else 'NO (CPU only)'}")
     print("=" * 55)
 
     # ------------------------------------------------------------------
@@ -310,16 +415,9 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
     # ------------------------------------------------------------------
     update_status(job_path, "Depth Maps", 75,
                   "Calculating depth maps (this takes the longest)...")
-    print(f"\n[5/6] Patch-Match Stereo  {'(GPU)' if _HAS_CUDA else '(CPU — slow)'}")
+    print("\n[5/6] Patch-Match Stereo  (COLMAP GPU index 0)")
     print("   ⏳  This step can take several minutes — please wait...")
-    run_command([
-        COLMAP_BIN, "patch_match_stereo",
-        "--workspace_path",   dense_dir,
-        "--workspace_format", "COLMAP",
-        "--PatchMatchStereo.geom_consistency", "true",
-        "--PatchMatchStereo.window_radius",    "5",
-        "--PatchMatchStereo.num_iterations",   "5",
-    ], step_label="PatchMatch")
+    run_command(_patch_match_stereo_command(dense_dir), step_label="PatchMatch")
 
     # ------------------------------------------------------------------
     # Step 6 — Stereo Fusion
