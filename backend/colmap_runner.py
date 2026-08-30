@@ -41,9 +41,78 @@ def _pytorch_cuda_works():
 
 _HAS_CUDA, _GPU_NAME = _pytorch_cuda_works()
 
-# COLMAP has its own CUDA runtime (independent of PyTorch).
-# Pass use_gpu=1 regardless; COLMAP falls back to CPU automatically if needed.
-USE_GPU_FLAG = "1"
+_COLMAP_HELP_CACHE = {}
+
+
+def _colmap_command_help(command):
+    if command not in _COLMAP_HELP_CACHE:
+        result = subprocess.run(
+            [COLMAP_BIN, command, "-h"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        _COLMAP_HELP_CACHE[command] = f"{result.stdout}\n{result.stderr}"
+    return _COLMAP_HELP_CACHE[command]
+
+
+def _supported_gpu_use_flag(command):
+    candidates = {
+        "feature_extractor": (
+            "--FeatureExtraction.use_gpu",
+            "--SiftExtraction.use_gpu",
+        ),
+        "exhaustive_matcher": (
+            "--FeatureMatching.use_gpu",
+            "--SiftMatching.use_gpu",
+        ),
+    }.get(command, ())
+    help_text = _colmap_command_help(command)
+    for flag in candidates:
+        if flag in help_text:
+            return flag
+    return None
+
+
+def _colmap_gpu_options(command):
+    flag = _supported_gpu_use_flag(command)
+    if not flag:
+        return []
+    return [flag, "1" if _HAS_CUDA else "0"]
+
+
+def _feature_extractor_command(database_path, images_dir):
+    return [
+        COLMAP_BIN, "feature_extractor",
+        "--database_path", database_path,
+        "--image_path", images_dir,
+        "--ImageReader.camera_model", "SIMPLE_RADIAL",
+        "--ImageReader.single_camera", "1",
+        *_colmap_gpu_options("feature_extractor"),
+        "--SiftExtraction.max_image_size", "1200",
+        "--SiftExtraction.max_num_features", "4096",
+        "--SiftExtraction.peak_threshold", "0.004",
+    ]
+
+
+def _exhaustive_matcher_command(database_path):
+    return [
+        COLMAP_BIN, "exhaustive_matcher",
+        "--database_path", database_path,
+        *_colmap_gpu_options("exhaustive_matcher"),
+        "--ExhaustiveMatching.block_size", "50",
+    ]
+
+
+def _looks_like_cuda_setup_failure(stderr):
+    text = (stderr or "").lower()
+    return (
+        "cuda" in text
+        or "cudart" in text
+        or "no cuda-capable device" in text
+        or "driver version is insufficient" in text
+        or "invalid device ordinal" in text
+    )
 
 
 def update_status(job_path, step_name, percent, message):
@@ -62,7 +131,7 @@ def update_status(job_path, step_name, percent, message):
         pass
 
 
-def run_command(cmd, step_label=""):
+def run_command(cmd, step_label="", return_stderr=False):
     cmd_str = " ".join(cmd)
     label = f"[{step_label}] " if step_label else ""
     print(f"   {label}▶  {cmd_str}")
@@ -79,9 +148,14 @@ def run_command(cmd, step_label=""):
     if result.returncode != 0:
         print(f"   ⚠️  {label}Command failed after {elapsed:.1f}s")
         print(f"   STDERR: {result.stderr[-500:]}")   # last 500 chars
+        if return_stderr:
+            return False, result.stderr
+
         return False
 
     print(f"   ✅ {label}Done in {elapsed:.1f}s")
+    if return_stderr:
+        return True, result.stderr
     return True
 
 
@@ -142,32 +216,45 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
             print("\n[1/6] Feature Extraction")
 
         update_status(job_path, "Feature Extraction", 10, "Extracting SIFT features...")
-        ok = run_command([
-            COLMAP_BIN, "feature_extractor",
-            "--database_path",                  database_path,
-            "--image_path",                     images_dir,
-            "--ImageReader.camera_model",       "SIMPLE_RADIAL",
-            "--ImageReader.single_camera",      "1",
-            "--SiftExtraction.max_image_size",  "1200",
-            "--SiftExtraction.max_num_features", "4096",
-            "--SiftExtraction.peak_threshold",  "0.004",
-        ], step_label="Feature Extractor")
+        ok, stderr = run_command(
+            _feature_extractor_command(database_path, images_dir),
+            step_label="Feature Extractor",
+            return_stderr=True,
+        )
         if not ok:
             # Remove the empty DB so a resume can retry cleanly
             if os.path.exists(database_path):
                 os.remove(database_path)
-            print("   ⚠️  Feature extraction failed — check image quality / lighting.")
+            if _looks_like_cuda_setup_failure(stderr):
+                raise RuntimeError(
+                    "COLMAP feature extraction failed during CUDA setup. "
+                    "This is a COLMAP/CUDA configuration failure, not evidence "
+                    "of image quality or lighting problems."
+                )
+            raise RuntimeError(
+                "COLMAP feature extraction failed; see COLMAP stderr above."
+            )
 
     # ------------------------------------------------------------------
     # Step 2 — Exhaustive Matching
     # ------------------------------------------------------------------
     update_status(job_path, "Matching", 25, "Matching frames...")
     print("\n[2/6] Exhaustive Matching")
-    run_command([
-        COLMAP_BIN, "exhaustive_matcher",
-        "--database_path",                  database_path,
-        "--ExhaustiveMatching.block_size",  "50",
-    ], step_label="Matcher")
+    ok, stderr = run_command(
+        _exhaustive_matcher_command(database_path),
+        step_label="Matcher",
+        return_stderr=True,
+    )
+    if not ok:
+        if _looks_like_cuda_setup_failure(stderr):
+            raise RuntimeError(
+                "COLMAP exhaustive matching failed during CUDA setup. "
+                "This is a COLMAP/CUDA configuration failure, not evidence "
+                "of image quality or lighting problems."
+            )
+        raise RuntimeError(
+            "COLMAP exhaustive matching failed; see COLMAP stderr above."
+        )
 
     # ------------------------------------------------------------------
     # Step 3 — Sparse Reconstruction (mapper)
