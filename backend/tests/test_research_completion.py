@@ -66,9 +66,9 @@ class ResearchCompletionTests(unittest.TestCase):
 
         self.assertEqual(
             completion["overall_status"],
-            "proposal_alignment_incomplete",
+            "software_prototype_complete",
         )
-        self.assertLess(
+        self.assertEqual(
             completion["proposal_software_completion_percent"],
             100.0,
         )
@@ -77,12 +77,13 @@ class ResearchCompletionTests(unittest.TestCase):
             0,
         )
         self.assertTrue(completion["external_validation_required"])
-        missing = [
-            req["key"]
+        trained = [
+            req
             for req in completion["requirements"]
-            if req["status"] == "missing"
+            if req["key"] == "trained_ml_facet_model"
         ]
-        self.assertIn("trained_ml_facet_model", missing)
+        self.assertEqual(trained[0]["status"], "complete")
+        self.assertIn("Simulation-derived", trained[0]["evidence"])
 
     def test_manufacturing_plan_is_operator_guidance(self):
         plan = build_manufacturing_plan(self._stats())

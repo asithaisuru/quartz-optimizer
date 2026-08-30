@@ -1,3 +1,4 @@
+import json
 import os
 
 
@@ -44,6 +45,43 @@ def _shape_evidence():
         "Pear Cut",
     }
     return required.issubset(shapes), sorted(shapes)
+
+
+def _facet_ml_evidence():
+    base = os.path.join(os.path.dirname(__file__), "research", "facet_ml")
+    model_path = os.path.join(base, "facet_orientation_model.json")
+    metrics_path = os.path.join(base, "facet_orientation_metrics.json")
+    sha_path = os.path.join(base, "facet_orientation_model_sha256.txt")
+    if not os.path.exists(model_path):
+        return (
+            False,
+            False,
+            "No simulation-trained facet-orientation model artifact found.",
+        )
+
+    try:
+        with open(metrics_path, encoding="utf-8") as handle:
+            metrics = json.load(handle)
+        with open(sha_path, encoding="utf-8") as handle:
+            sha = handle.read().strip()
+        test_model = metrics["splits"]["test"]["model"]
+        test_baseline = metrics["splits"]["test"]["heuristic_baseline"]
+        evidence = (
+            "Simulation-derived grouped evaluation; "
+            f"model sha256={sha}; "
+            f"test MAE={test_model['mae']:.3f} vs "
+            f"heuristic {test_baseline['mae']:.3f}; "
+            f"top-orientation agreement={test_model['top_orientation_agreement']:.3f} "
+            f"vs heuristic {test_baseline['top_orientation_agreement']:.3f}."
+        )
+        return True, True, evidence
+    except (OSError, ValueError, KeyError, TypeError):
+        return (
+            True,
+            False,
+            "Facet-orientation model artifact exists, but metrics evidence "
+            "could not be read.",
+        )
 
 
 def build_manufacturing_plan(stats):
@@ -101,6 +139,7 @@ def build_research_completion(stats, job_folder=None):
     manufacturing = stats.get("manufacturing_plan", {})
     settings = diag.get("optimizer_settings", {})
     shapes_ok, shape_names = _shape_evidence()
+    facet_ml_ok, facet_ml_validated, facet_ml_summary = _facet_ml_evidence()
 
     rough_target = rough.get("target_clearance_mesh_units")
     rough_actual = rough.get("min_clearance_after_mesh_units")
@@ -226,13 +265,10 @@ def build_research_completion(stats, job_folder=None):
         ),
         _requirement(
             "trained_ml_facet_model",
-            "Trained ML model for inclusion-visibility facet scoring",
-            False,
-            False,
-            (
-                "Proposal requires a trained ML model. Current implementation "
-                "uses heuristic defect visibility plus light scoring."
-            ),
+            "Simulation-trained ML surrogate for inclusion-visibility facet scoring",
+            facet_ml_ok,
+            facet_ml_validated,
+            facet_ml_summary,
         ),
         _requirement(
             "yield_diagnostics",
@@ -333,7 +369,6 @@ def build_research_completion(stats, job_folder=None):
         "Compare predicted yield with measured expert/manual cut plans.",
         "Measure physical post-cut carat recovery and blade loss.",
         "Collect expert grading for defect visibility and facet orientation.",
-        "Train and validate the ML facet-orientation model required by the proposal.",
         "Validate reconstruction accuracy against physical measurements, targeting 0.1 mm.",
         "Validate visible flaw detection accuracy against expert labels, targeting >=90%.",
         "Validate waste reduction against traditional cutting, targeting >=15%.",

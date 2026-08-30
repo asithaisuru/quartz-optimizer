@@ -303,30 +303,7 @@ def _load_defect_detection(job_folder):
     return result
 
 
-def _facet_recommendation(cut_path, job_folder=None):
-    try:
-        mesh = trimesh.load(cut_path)
-        if isinstance(mesh, trimesh.Scene):
-            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
-        mesh.fix_normals()
-    except Exception:
-        return {
-            "method": "heuristic",
-            "score": 0,
-            "normal": [0, 0, 1],
-            "visible_defect_estimate": 0,
-            "reason": "cut mesh unavailable",
-        }
-
-    defects = np.empty((0, 3))
-    if job_folder:
-        defects_path = os.path.join(job_folder, "dense", "defects.ply")
-        if os.path.exists(defects_path):
-            try:
-                defects = np.asarray(trimesh.load(defects_path).vertices)
-            except Exception:
-                defects = np.empty((0, 3))
-
+def _heuristic_facet_recommendation(mesh, defects):
     candidates = []
     try:
         facets = mesh.facets
@@ -385,6 +362,44 @@ def _facet_recommendation(cut_path, job_folder=None):
         "visible_defect_estimate": 0,
         "reason": "no candidate normals",
     }
+
+
+def _facet_recommendation(cut_path, job_folder=None):
+    try:
+        mesh = trimesh.load(cut_path)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
+        mesh.fix_normals()
+    except Exception:
+        return {
+            "method": "heuristic",
+            "score": 0,
+            "normal": [0, 0, 1],
+            "visible_defect_estimate": 0,
+            "reason": "cut mesh unavailable",
+        }
+
+    defects = np.empty((0, 3))
+    if job_folder:
+        defects_path = os.path.join(job_folder, "dense", "defects.ply")
+        if os.path.exists(defects_path):
+            try:
+                defects = np.asarray(trimesh.load(defects_path).vertices)
+            except Exception:
+                defects = np.empty((0, 3))
+
+    heuristic = _heuristic_facet_recommendation(mesh, defects)
+    if len(defects):
+        try:
+            from facet_ml import recommend_facet_orientation_ml
+
+            ml_recommendation = recommend_facet_orientation_ml(mesh, defects)
+            if ml_recommendation:
+                ml_recommendation["heuristic_fallback"] = heuristic
+                return ml_recommendation
+        except Exception:
+            pass
+    return heuristic
 
 
 def _build_gem_details(strat, option_index, output_dir, scale_factor,

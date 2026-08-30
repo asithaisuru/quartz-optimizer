@@ -1,0 +1,76 @@
+{
+  "dataset": {
+    "row_count": 11016,
+    "scenario_group_count": 504,
+    "split_group_counts": {
+      "test": 76,
+      "train": 352,
+      "validation": 76
+    },
+    "split_row_counts": {
+      "test": 1656,
+      "train": 7693,
+      "validation": 1667
+    }
+  },
+  "dataset_label": "SIMULATION-DERIVED facet-orientation dataset",
+  "features": [
+    "normal_x",
+    "normal_y",
+    "normal_z",
+    "abs_normal_x",
+    "abs_normal_y",
+    "abs_normal_z",
+    "defect_count",
+    "severity_mean",
+    "severity_max",
+    "front_defect_ratio",
+    "legacy_visible_ratio",
+    "centrality_mean",
+    "centrality_max",
+    "severity_centrality_mean",
+    "ray_exit_min_norm",
+    "ray_exit_mean_norm",
+    "ray_exit_std_norm",
+    "depth_mean_norm",
+    "depth_std_norm",
+    "shape_xy_aspect",
+    "shape_z_fraction",
+    "shape_volume_norm",
+    "shape_area_norm",
+    "aligned_face_area_share",
+    "visibility_proxy"
+  ],
+  "model": {
+    "artifact": "backend\\research\\facet_ml\\facet_orientation_model.json",
+    "max_depth": 7,
+    "min_samples_leaf": 8,
+    "model_type": "simulation_trained_randomized_tree_ensemble_regressor",
+    "n_estimators": 64,
+    "sha256": "a27055e97c8c667898dea64eedcc5ede424f3be13354469d478ca3199f042646"
+  },
+  "random_seed": 20260830,
+  "real_reconstruction_assessment": {
+    "confirmed_independent_reconstructed_specimens": 1,
+    "decision": "simulation-derived dataset used because independent real reconstructed specimens are insufficient for held-out specimen grouped ML evaluation",
+    "eligible_for_specimen_grouped_ml": false,
+    "minimum_independent_specimens_required": 5,
+    "specimen_ids": [
+      "QZ-01"
+    ]
+  },
+  "simulation_design": {
+    "defects": "randomized valid internal points sampled inside each supported cut geometry convex hull with random visibility severity",
+    "scenario_level_grouping": "all candidate orientations from a simulated defect scenario share one scenario_id and remain within the same split",
+    "supported_shapes": [
+      "Cushion Cut",
+      "Emerald Cut",
+      "Marquise Cut",
+      "Oval Brilliant",
+      "Pear Cut",
+      "Princess Cut",
+      "Round Brilliant Cut"
+    ],
+    "target": "deterministic geometric/ray inclusion-visibility score; higher is lower simulated visible inclusion exposure"
+  }
+}
