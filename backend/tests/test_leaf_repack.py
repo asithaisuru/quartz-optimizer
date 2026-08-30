@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 
 try:
     import numpy as np
@@ -57,7 +58,152 @@ class LeafPiecesTests(unittest.TestCase):
 
 
 @unittest.skipIf(opt is None, "numpy/trimesh dependencies are not installed")
+class CuttableCavityFrontierTests(unittest.TestCase):
+    def _placement(self, name, volume, flat):
+        return SimpleNamespace(
+            variant=SimpleNamespace(key=name),
+            name=name,
+            pos=np.array([float(flat), 0.0, 0.0]),
+            scale=1.0,
+            volume=float(volume),
+            occ_set={flat},
+            collision_set={flat},
+        )
+
+    def test_frontier_reserves_time_to_expand_candidates_found_at_timeout(self):
+        seed = self._placement("seed", 10.0, 1)
+        extra = self._placement("extra", 1.0, 2)
+        state = opt.BeamState([seed], set(seed.collision_set), seed.volume)
+        now = {"value": 100.0}
+        deadline = 110.0
+        local_deadlines = []
+        accepted_lengths = []
+
+        original_time = opt.time.time
+        original_local = opt._local_pocket_candidates
+        original_filter = opt._quick_cuttable_filter
+
+        def fake_time():
+            return now["value"]
+
+        def fake_local(_state, _shapes, _fallback, _rough, _ctx,
+                       local_deadline, structural_plan=None):
+            local_deadlines.append(local_deadline)
+            now["value"] = local_deadline
+            diag = {
+                "checked_fits": 1,
+                "fit_candidates": 1,
+                "below_saleable_size": 0,
+                "rejected_reasons": {},
+                "timed_out": True,
+                "free_space_components": {},
+                "verified_leaf_regions": 0,
+                "leaf_aware_points": 0,
+            }
+            if len(local_deadlines) == 1:
+                return [extra], diag
+            return [], diag
+
+        def fake_filter(_ctx, extra_normals=None):
+            def accepts(candidate_state):
+                accepted_lengths.append(len(candidate_state.placements))
+                return True
+            return accepts
+
+        try:
+            opt.time.time = fake_time
+            opt._local_pocket_candidates = fake_local
+            opt._quick_cuttable_filter = fake_filter
+
+            states, diag = opt._cuttable_cavity_frontier(
+                [state],
+                {},
+                [],
+                None,
+                SimpleNamespace(),
+                2,
+                deadline,
+                "unit_test",
+            )
+        finally:
+            opt.time.time = original_time
+            opt._local_pocket_candidates = original_local
+            opt._quick_cuttable_filter = original_filter
+
+        self.assertLess(local_deadlines[0], deadline)
+        self.assertIn(2, accepted_lengths)
+        self.assertTrue(any(len(item.placements) == 2 for item in states))
+        self.assertEqual(diag["accepted_additions"], 1)
+        self.assertEqual(diag["stop_reason"], "time_budget_exhausted")
+
+    def test_finalizer_can_verify_generated_state_without_refinement(self):
+        seed = self._placement("seed", 10.0, 1)
+        extra = self._placement("extra", 1.0, 2)
+        state = opt.BeamState(
+            [seed, extra],
+            set(seed.collision_set) | set(extra.collision_set),
+            seed.volume + extra.volume,
+        )
+        destroyed = opt.BeamState([seed], set(seed.collision_set), seed.volume)
+
+        original_refine = opt._refine_state
+        original_blade = opt._enforce_blade_clearance
+        original_rough = opt._enforce_rough_clearance
+        original_gap = opt._state_min_surface_gap
+        original_plan_or_reduce = opt._plan_or_reduce_state
+
+        def fake_plan_or_reduce(candidate_state, _rough, _ctx, _defect_points,
+                                _deadline, preferred_normals=None):
+            if candidate_state is state:
+                return candidate_state, {"status": "complete"}
+            return candidate_state, {"status": "not_cuttable"}
+
+        try:
+            opt._refine_state = lambda _state, _rough, _ctx: destroyed
+            opt._enforce_blade_clearance = lambda candidate_state, _ctx: (
+                candidate_state,
+                {"adjustments": 0},
+            )
+            opt._enforce_rough_clearance = lambda candidate_state, _ctx: (
+                candidate_state,
+                {"adjustments": 0},
+            )
+            opt._state_min_surface_gap = lambda _placements: None
+            opt._plan_or_reduce_state = fake_plan_or_reduce
+
+            result, diag = opt._finalize_cuttable_frontier(
+                [state],
+                None,
+                SimpleNamespace(fit={"gem_spacing_buffer": 0.0}, pitch=1.0),
+                np.zeros((0, 3)),
+                opt.time.time() + 5.0,
+                refine_states=False,
+            )
+        finally:
+            opt._refine_state = original_refine
+            opt._enforce_blade_clearance = original_blade
+            opt._enforce_rough_clearance = original_rough
+            opt._state_min_surface_gap = original_gap
+            opt._plan_or_reduce_state = original_plan_or_reduce
+
+        self.assertIsNotNone(result)
+        self.assertIs(result["state"], state)
+        self.assertEqual(diag["states_verified"], 1)
+
+
+@unittest.skipIf(opt is None, "numpy/trimesh dependencies are not installed")
 class RepackLeafPiecesTests(unittest.TestCase):
+    def _synthetic_placement(self, name, volume, flat):
+        return SimpleNamespace(
+            variant=SimpleNamespace(key=name, name=name),
+            name=name,
+            pos=np.array([float(flat), 0.0, 0.0]),
+            scale=1.0,
+            volume=float(volume),
+            occ_set={flat},
+            collision_set={flat},
+        )
+
     def _context_for(self, rough, blade_kerf_mm=0.5, preform_margin_mm=0.3,
                      max_cut_depth_mm=60.0, mm_per_mesh_unit=10.0,
                      min_secondary_carat=None, max_gems=12):
@@ -88,6 +234,67 @@ class RepackLeafPiecesTests(unittest.TestCase):
         )
         self.assertIsNotNone(placement, f"setup failed to place seed gem: {reason}")
         return placement
+
+    def test_leaf_repack_reserves_time_for_exact_reverification(self):
+        seed = self._synthetic_placement("seed", 10.0, 1)
+        extra = self._synthetic_placement("extra", 1.0, 2)
+        state = opt.BeamState([seed], set(seed.collision_set), seed.volume)
+        plan = {"status": "complete", "sequence": []}
+        now = {"value": 100.0}
+        deadline = 110.0
+        search_deadlines = []
+
+        original_time = opt.time.time
+        original_leaf_pieces = opt._leaf_pieces
+        original_leaf_submesh = opt._leaf_submesh
+        original_best = opt._best_extra_placement_in_leaf
+        original_plan_or_reduce = opt._plan_or_reduce_state
+
+        def fake_time():
+            return now["value"]
+
+        def fake_best(_submesh, _existing, _shapes, _fit, _defect_points,
+                      _preferred_shape, search_deadline, _diag):
+            search_deadlines.append(search_deadline)
+            now["value"] = search_deadline
+            return extra, None
+
+        def fake_plan_or_reduce(candidate_state, _rough, _ctx, _defect_points,
+                                verify_deadline, preferred_normals=None):
+            if verify_deadline <= now["value"]:
+                return state, {"status": "timeout"}
+            return candidate_state, {"status": "complete"}
+
+        try:
+            opt.time.time = fake_time
+            opt._leaf_pieces = lambda _plan: [("gem_1", [])]
+            opt._leaf_submesh = lambda _rough, _constraints: SimpleNamespace(
+                volume=20.0,
+                extents=np.array([4.0, 2.0, 2.0]),
+            )
+            opt._best_extra_placement_in_leaf = fake_best
+            opt._plan_or_reduce_state = fake_plan_or_reduce
+
+            new_state, new_plan, diag = opt._repack_leaf_pieces(
+                state,
+                plan,
+                None,
+                SimpleNamespace(fit={}),
+                {},
+                np.zeros((0, 3)),
+                deadline,
+            )
+        finally:
+            opt.time.time = original_time
+            opt._leaf_pieces = original_leaf_pieces
+            opt._leaf_submesh = original_leaf_submesh
+            opt._best_extra_placement_in_leaf = original_best
+            opt._plan_or_reduce_state = original_plan_or_reduce
+
+        self.assertLess(search_deadlines[0], deadline)
+        self.assertEqual(new_plan["status"], "complete")
+        self.assertEqual(len(new_state.placements), 2)
+        self.assertEqual(diag["gems_added"], 1)
 
     def test_never_regresses_or_drops_an_already_verified_gem(self):
         # A rough with barely more room than the one gem that already

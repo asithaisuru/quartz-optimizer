@@ -78,6 +78,8 @@ CUTTABLE_POCKET_COMPONENT_LIMIT = 6
 CUTTABLE_POCKET_POINTS_PER_COMPONENT = 8
 CUTTABLE_POCKET_CANDIDATE_LIMIT = 24
 CUTTABLE_POCKET_SAFETY_ROUND_CEILING = 500
+CUTTABLE_CANDIDATE_EXPANSION_RESERVE_SECONDS = 2.0
+CUTTABLE_DEADLINE_RESERVE_FRACTION = 0.25
 CUTTABLE_GLOBAL_DEADLINE_SECONDS = 60.0
 CUTTABLE_CAVITY_DEADLINE_SECONDS = 98.0
 # Leave two seconds for serialization, diagnostics, and caller overhead.
@@ -1026,6 +1028,17 @@ def _constraint_scale_limit(variant, pos, constraints, ctx, max_dim):
     return max(0.0, float(limit))
 
 
+def _deadline_before_reserve(deadline, reserve_seconds):
+    remaining = float(deadline - time.time())
+    if remaining <= 0.0:
+        return float(deadline)
+    reserve = min(
+        float(reserve_seconds),
+        remaining * CUTTABLE_DEADLINE_RESERVE_FRACTION,
+    )
+    return float(deadline) - max(0.0, reserve)
+
+
 def _leaf_aware_points(points, plan, state, ctx):
     leaves = _plan_leaf_constraints(plan, state)
     if not leaves:
@@ -1211,13 +1224,20 @@ def _cuttable_cavity_frontier(seed_states, shapes, fallback_candidates, rough,
                 break
             if len(state.placements) >= max_gems:
                 continue
+            local_deadline = _deadline_before_reserve(
+                deadline,
+                CUTTABLE_CANDIDATE_EXPANSION_RESERVE_SECONDS,
+            )
+            if time.time() >= local_deadline:
+                diagnostics["timed_out"] = True
+                break
             local, local_diag = _local_pocket_candidates(
                 state,
                 shapes,
                 fallback_candidates,
                 rough,
                 ctx,
-                deadline,
+                local_deadline,
                 structural_plan=structural_plan,
             )
             diagnostics["checked_fits"] += local_diag["checked_fits"]
@@ -2054,7 +2074,13 @@ def _repack_leaf_pieces(state, plan, rough, ctx, shapes, defect_points,
     ]
 
     new_placements = []
-    leaf_deadline = min(deadline, time.time() + LEAF_REPACK_TIME_LIMIT_SECONDS)
+    leaf_deadline = min(
+        _deadline_before_reserve(
+            deadline,
+            LEAF_REPACK_VERIFY_TIME_LIMIT_SECONDS,
+        ),
+        time.time() + LEAF_REPACK_TIME_LIMIT_SECONDS,
+    )
     for gem_id, constraints in leaves:
         diag["leaves_checked"] += 1
         if time.time() >= leaf_deadline:
@@ -2116,7 +2142,8 @@ def _repack_leaf_pieces(state, plan, rough, ctx, shapes, defect_points,
 
 def _finalize_cuttable_frontier(states, rough, ctx, defect_points, deadline,
                                 verification_limit=6,
-                                structural_plan=None):
+                                structural_plan=None,
+                                refine_states=True):
     best = None
     diagnostics = {
         "states_considered": 0,
@@ -2139,10 +2166,13 @@ def _finalize_cuttable_frontier(states, rough, ctx, defect_points, deadline,
             diagnostics["timed_out"] = True
             break
         diagnostics["states_considered"] += 1
-        # Preserve + Fill inherits a verified partition. Moving or growing its
-        # placements here can cross that cut plane after the cavity search has
-        # explicitly constrained the new gem to one leaf piece.
-        refined = state if structural_plan is not None else _refine_state(
+        # Cavity-generated states already encode the candidate placement being
+        # verified. Moving or growing it here can invalidate an otherwise
+        # complete straight-cut tree, so callers may preserve the generated
+        # geometry and let the exact planner decide.
+        refined = state if (
+            structural_plan is not None or not refine_states
+        ) else _refine_state(
             state,
             rough,
             ctx,
@@ -2827,8 +2857,16 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
 
                 if progress_callback:
                     progress_callback(99, 100, "Repacking cuttable free-space frontier")
+                repacked_seed_states = _unique_states([
+                    *(preserve_states or []),
+                    *(global_frontier or []),
+                    baseline_state,
+                ])
+                repacked_seed_states = [
+                    state for state in repacked_seed_states if state.placements
+                ]
                 repacked_states, repacked_diag = _cuttable_cavity_frontier(
-                    global_frontier or [baseline_state],
+                    repacked_seed_states or [baseline_state],
                     shapes,
                     candidates,
                     rough,
@@ -2851,6 +2889,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                         baseline_result["plan"]
                         if baseline_result is not None else None
                     ),
+                    refine_states=False,
                 )
                 repacked_result, repacked_verify_diag = _finalize_cuttable_frontier(
                     repacked_states or global_frontier or [baseline_state],
@@ -2859,6 +2898,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     fpts,
                     t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS,
                     verification_limit=6,
+                    refine_states=False,
                 )
                 if preserve_result is None and baseline_result is not None:
                     preserve_result = baseline_result
