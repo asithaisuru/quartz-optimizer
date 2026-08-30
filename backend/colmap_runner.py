@@ -205,6 +205,58 @@ def _patch_match_stereo_command(dense_dir):
     return cmd
 
 
+def _is_within_directory(parent, child):
+    parent_path = os.path.normcase(os.path.realpath(os.path.abspath(parent)))
+    child_path = os.path.normcase(os.path.realpath(os.path.abspath(child)))
+    return os.path.commonpath([parent_path, child_path]) == parent_path
+
+
+def _clear_patch_match_outputs(dense_dir):
+    stereo_dir = os.path.join(dense_dir, "stereo")
+    for name in ("depth_maps", "normal_maps", "consistency_graphs"):
+        target = os.path.join(stereo_dir, name)
+        if not _is_within_directory(stereo_dir, target):
+            raise RuntimeError(f"Unsafe PatchMatch cleanup path: {target}")
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        elif os.path.exists(target):
+            os.remove(target)
+        os.makedirs(target, exist_ok=True)
+
+
+def _run_patch_match_stereo(dense_dir, retry_delay_seconds=3):
+    cmd = _patch_match_stereo_command(dense_dir)
+    ok, stderr = run_command(cmd, step_label="PatchMatch", return_stderr=True)
+    if ok:
+        return True
+
+    if not _looks_like_cuda_setup_failure(stderr):
+        return False
+
+    print(
+        "   WARNING: PatchMatch CUDA setup failed; retrying once before "
+        "declaring a COLMAP/CUDA configuration failure."
+    )
+    _clear_patch_match_outputs(dense_dir)
+    time.sleep(retry_delay_seconds)
+    retry_ok, retry_stderr = run_command(
+        cmd,
+        step_label="PatchMatch retry",
+        return_stderr=True,
+    )
+    if retry_ok:
+        return True
+
+    cuda_stderr = retry_stderr or stderr
+    if _looks_like_cuda_setup_failure(cuda_stderr):
+        raise RuntimeError(
+            "COLMAP PatchMatch failed during CUDA setup after one retry. "
+            "This is a COLMAP/CUDA device or driver availability failure, "
+            "not evidence of image quality or lighting problems."
+        )
+    return False
+
+
 def _looks_like_cuda_setup_failure(stderr):
     text = (stderr or "").lower()
     return (
@@ -417,7 +469,8 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
                   "Calculating depth maps (this takes the longest)...")
     print("\n[5/6] Patch-Match Stereo  (COLMAP GPU index 0)")
     print("   ⏳  This step can take several minutes — please wait...")
-    run_command(_patch_match_stereo_command(dense_dir), step_label="PatchMatch")
+    if not _run_patch_match_stereo(dense_dir):
+        print("\n   WARNING: PatchMatch failed - continuing to fusion/fallback checks.")
 
     # ------------------------------------------------------------------
     # Step 6 — Stereo Fusion

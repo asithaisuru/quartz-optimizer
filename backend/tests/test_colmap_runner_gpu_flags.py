@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -158,6 +159,87 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         self.assertIn("--PatchMatchStereo.geom_consistency", cmd)
         self.assertIn("--PatchMatchStereo.window_radius", cmd)
         self.assertIn("--PatchMatchStereo.num_iterations", cmd)
+
+    def test_patch_match_retries_once_for_cuda_setup_failure(self):
+        cmd = ["colmap", "patch_match_stereo"]
+        with tempfile.TemporaryDirectory() as tmp:
+            stereo_dir = os.path.join(tmp, "stereo")
+            os.makedirs(stereo_dir)
+            config_path = os.path.join(stereo_dir, "patch-match.cfg")
+            with open(config_path, "w") as handle:
+                handle.write("frame.jpg\n__auto__, 20\n")
+            for output_dir in ("depth_maps", "normal_maps", "consistency_graphs"):
+                path = os.path.join(stereo_dir, output_dir)
+                os.makedirs(path)
+                with open(os.path.join(path, "partial.bin"), "w") as handle:
+                    handle.write("partial")
+
+            with (
+                patch.object(colmap_runner, "_patch_match_stereo_command", return_value=cmd),
+                patch.object(
+                    colmap_runner,
+                    "run_command",
+                    side_effect=[
+                        (False, "CUDA error: no CUDA-capable device is detected"),
+                        (True, ""),
+                    ],
+                ) as run_command,
+                patch.object(colmap_runner.time, "sleep") as sleep,
+            ):
+                self.assertTrue(colmap_runner._run_patch_match_stereo(tmp))
+
+            self.assertEqual(run_command.call_count, 2)
+            sleep.assert_called_once()
+            self.assertTrue(os.path.exists(config_path))
+            for output_dir in ("depth_maps", "normal_maps", "consistency_graphs"):
+                path = os.path.join(stereo_dir, output_dir)
+                self.assertTrue(os.path.isdir(path))
+                self.assertEqual(os.listdir(path), [])
+
+    def test_patch_match_persistent_cuda_setup_failure_is_clear(self):
+        cmd = ["colmap", "patch_match_stereo"]
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "stereo", "depth_maps"))
+            with (
+                patch.object(colmap_runner, "_patch_match_stereo_command", return_value=cmd),
+                patch.object(
+                    colmap_runner,
+                    "run_command",
+                    return_value=(False, "cudaSetDevice failed: no CUDA-capable device"),
+                ) as run_command,
+                patch.object(colmap_runner.time, "sleep"),
+            ):
+                with self.assertRaises(RuntimeError) as err:
+                    colmap_runner._run_patch_match_stereo(tmp)
+
+            self.assertEqual(run_command.call_count, 2)
+            self.assertIn("COLMAP PatchMatch failed during CUDA setup", str(err.exception))
+            self.assertIn("not evidence of image quality", str(err.exception))
+
+    def test_patch_match_non_cuda_failure_keeps_fallback_path(self):
+        cmd = ["colmap", "patch_match_stereo"]
+        with tempfile.TemporaryDirectory() as tmp:
+            partial_dir = os.path.join(tmp, "stereo", "depth_maps")
+            os.makedirs(partial_dir)
+            partial_path = os.path.join(partial_dir, "partial.bin")
+            with open(partial_path, "w") as handle:
+                handle.write("partial")
+
+            with (
+                patch.object(colmap_runner, "_patch_match_stereo_command", return_value=cmd),
+                patch.object(
+                    colmap_runner,
+                    "run_command",
+                    return_value=(False, "workspace configuration is invalid"),
+                ) as run_command,
+                patch.object(colmap_runner.time, "sleep") as sleep,
+            ):
+                self.assertFalse(colmap_runner._run_patch_match_stereo(tmp))
+
+            self.assertTrue(os.path.exists(partial_path))
+
+        run_command.assert_called_once()
+        sleep.assert_not_called()
 
     def test_cuda_setup_errors_are_classified_separately(self):
         self.assertTrue(
