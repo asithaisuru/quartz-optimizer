@@ -46,6 +46,76 @@ def fake_help(command):
 
 
 class ColmapRunnerGpuFlagTests(unittest.TestCase):
+    def test_colmap_env_removes_disable_all_cuda_mask_without_mutating_parent(self):
+        with (
+            patch.dict(os.environ, {colmap_runner.CUDA_VISIBLE_DEVICES_ENV: "-1"}),
+            patch.object(colmap_runner, "_COLMAP_CUDA_ENV_SANITIZED_LOGGED", False),
+            patch("builtins.print") as mocked_print,
+        ):
+            child = colmap_runner._colmap_subprocess_env()
+
+            self.assertEqual(os.environ[colmap_runner.CUDA_VISIBLE_DEVICES_ENV], "-1")
+            self.assertNotIn(colmap_runner.CUDA_VISIBLE_DEVICES_ENV, child)
+            mocked_print.assert_called_once()
+
+    def test_colmap_env_preserves_valid_cuda_mask(self):
+        parent = {
+            colmap_runner.CUDA_VISIBLE_DEVICES_ENV: "0",
+            "PATH": r"C:\Windows",
+        }
+        with patch("builtins.print") as mocked_print:
+            child = colmap_runner._colmap_subprocess_env(parent)
+
+        self.assertEqual(parent[colmap_runner.CUDA_VISIBLE_DEVICES_ENV], "0")
+        self.assertEqual(child[colmap_runner.CUDA_VISIBLE_DEVICES_ENV], "0")
+        mocked_print.assert_not_called()
+
+    def test_colmap_env_preserves_multi_gpu_cuda_mask(self):
+        parent = {
+            colmap_runner.CUDA_VISIBLE_DEVICES_ENV: "0,1",
+            "PATH": r"C:\Windows",
+        }
+        child = colmap_runner._colmap_subprocess_env(parent)
+
+        self.assertEqual(child[colmap_runner.CUDA_VISIBLE_DEVICES_ENV], "0,1")
+
+    def test_colmap_env_leaves_unset_cuda_mask_unset(self):
+        parent = {"PATH": r"C:\Windows"}
+        child = colmap_runner._colmap_subprocess_env(parent)
+
+        self.assertNotIn(colmap_runner.CUDA_VISIBLE_DEVICES_ENV, parent)
+        self.assertNotIn(colmap_runner.CUDA_VISIBLE_DEVICES_ENV, child)
+
+    def test_colmap_env_sanitization_logs_once(self):
+        parent = {colmap_runner.CUDA_VISIBLE_DEVICES_ENV: "-1"}
+        with (
+            patch.object(colmap_runner, "_COLMAP_CUDA_ENV_SANITIZED_LOGGED", False),
+            patch("builtins.print") as mocked_print,
+        ):
+            colmap_runner._colmap_subprocess_env(parent)
+            colmap_runner._colmap_subprocess_env(parent)
+
+        mocked_print.assert_called_once()
+
+    def test_run_command_uses_sanitized_colmap_child_env(self):
+        completed = colmap_runner.subprocess.CompletedProcess(
+            args=["colmap", "-h"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with (
+            patch.dict(os.environ, {colmap_runner.CUDA_VISIBLE_DEVICES_ENV: "-1"}),
+            patch.object(colmap_runner, "_COLMAP_CUDA_ENV_SANITIZED_LOGGED", True),
+            patch.object(colmap_runner.subprocess, "run", return_value=completed) as run,
+            patch("builtins.print"),
+        ):
+            self.assertTrue(colmap_runner.run_command(["colmap", "-h"]))
+            self.assertEqual(os.environ[colmap_runner.CUDA_VISIBLE_DEVICES_ENV], "-1")
+
+        child_env = run.call_args.kwargs["env"]
+        self.assertNotIn(colmap_runner.CUDA_VISIBLE_DEVICES_ENV, child_env)
+
     def test_default_local_colmap_411_path_is_preferred_before_path(self):
         old_path = r"D:\colmap\bin\colmap.exe"
         resolved = colmap_runner._resolve_colmap_bin(

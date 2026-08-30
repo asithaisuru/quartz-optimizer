@@ -7,6 +7,7 @@ import torch
 
 COLMAP_BIN_ENV = "QUARTZ_COLMAP_BIN"
 DEFAULT_COLMAP_BIN = r"D:\colmap-new\bin\colmap.exe"
+CUDA_VISIBLE_DEVICES_ENV = "CUDA_VISIBLE_DEVICES"
 
 
 def _clean_executable_path(path):
@@ -87,6 +88,31 @@ _HAS_CUDA, _GPU_NAME = _pytorch_cuda_works()
 
 _COLMAP_HELP_CACHE = {}
 _COLMAP_VERSION_CACHE = {}
+_COLMAP_CUDA_ENV_SANITIZED_LOGGED = False
+
+
+def _cuda_visible_devices_disables_all(value):
+    return value is not None and str(value).strip() == "-1"
+
+
+def _log_colmap_cuda_env_sanitized(value):
+    global _COLMAP_CUDA_ENV_SANITIZED_LOGGED
+    if _COLMAP_CUDA_ENV_SANITIZED_LOGGED:
+        return
+    print(
+        f"   WARNING: Removed {CUDA_VISIBLE_DEVICES_ENV}={value!r} "
+        "from COLMAP child environment so COLMAP can see GPU index 0."
+    )
+    _COLMAP_CUDA_ENV_SANITIZED_LOGGED = True
+
+
+def _colmap_subprocess_env(parent_env=None):
+    env = dict(os.environ if parent_env is None else parent_env)
+    value = env.get(CUDA_VISIBLE_DEVICES_ENV)
+    if _cuda_visible_devices_disables_all(value):
+        env.pop(CUDA_VISIBLE_DEVICES_ENV, None)
+        _log_colmap_cuda_env_sanitized(value)
+    return env
 
 
 def _colmap_command_help(command):
@@ -98,6 +124,7 @@ def _colmap_command_help(command):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=_colmap_subprocess_env(),
         )
         _COLMAP_HELP_CACHE[cache_key] = f"{result.stdout}\n{result.stderr}"
     return _COLMAP_HELP_CACHE[cache_key]
@@ -111,6 +138,7 @@ def _colmap_version_line():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=_colmap_subprocess_env(),
         )
         text = f"{result.stdout}\n{result.stderr}"
         version = next(
@@ -290,11 +318,10 @@ def run_command(cmd, step_label="", return_stderr=False):
     print(f"   {label}▶  {cmd_str}")
     t0 = time.time()
 
-    env = os.environ.copy()
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, env=env
+        text=True, env=_colmap_subprocess_env()
     )
     elapsed = time.time() - t0
 
