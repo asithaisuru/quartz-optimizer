@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { UploadCloud, Search, Camera, RefreshCw, Scale, Gem, Layers, Maximize2, ChevronDown, ChevronUp, Video, SlidersHorizontal } from 'lucide-react';
+import { UploadCloud, Search, Camera, RefreshCw, Scale, Gem, Layers, Maximize2, ChevronDown, ChevronUp, Video, SlidersHorizontal, Loader2 } from 'lucide-react';
 import axios from 'axios';
+import CaptureQualityPanel from './CaptureQualityPanel';
+import { checkCaptureQuality, CAPTURE_QUALITY_PHASES } from '../utils/captureQuality';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -20,6 +22,14 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
   const [maxGems,       setMaxGems]       = useState("12");
   const [minGemCarat,   setMinGemCarat]   = useState("0.5");
   const [settingsError, setSettingsError] = useState("");
+
+  // Capture-quality pre-flight (runs after files are chosen, before the
+  // actual /upload + reconstruction kicks off).
+  const [stagedFiles, setStagedFiles] = useState(null);
+  const [quality, setQuality] = useState({
+    phase: CAPTURE_QUALITY_PHASES.IDLE, report: null, message: '',
+  });
+  const [qualityAck, setQualityAck] = useState(false);
 
   // Fetch available gem shapes from backend on mount
   useEffect(() => {
@@ -59,8 +69,34 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
       }
     }
     setSettingsError("");
+    stageForQualityCheck(Array.from(files));
+  };
+
+  // Stage the chosen files and run the pre-flight capture-quality check
+  // before the real /upload (and expensive COLMAP reconstruction) begins.
+  const stageForQualityCheck = async (files) => {
+    setStagedFiles(files);
+    setQualityAck(false);
+    setQuality({ phase: CAPTURE_QUALITY_PHASES.ANALYZING, report: null, message: '' });
+
+    const result = await checkCaptureQuality({ apiUrl: API_URL, files, scanMode });
+    if (result.phase === 'ready') {
+      setQuality({ phase: result.report.status, report: result.report, message: '' });
+    } else {
+      setQuality({ phase: result.phase, report: null, message: result.message || '' });
+    }
+  };
+
+  const chooseDifferentVideos = () => {
+    setStagedFiles(null);
+    setQuality({ phase: CAPTURE_QUALITY_PHASES.IDLE, report: null, message: '' });
+    setQualityAck(false);
+  };
+
+  const startReconstruction = () => {
+    if (!stagedFiles) return;
     onFileSelect(
-      files,
+      stagedFiles,
       scanMode,
       knownWeight || null,
       selectedShape || null,
@@ -76,6 +112,26 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
       }
     );
   };
+
+  // Only the backend-declared status/overrideAllowed gate reconstruction —
+  // ANALYZING/PASS/BORDERLINE/FAIL come straight from `quality.phase`, and
+  // UNAVAILABLE/ERROR fall back to the pre-existing (ungated) workflow so a
+  // missing or failing check never blocks the operator.
+  const qualityBlocksStart =
+    quality.phase === CAPTURE_QUALITY_PHASES.FAIL && !quality.report?.overrideAllowed;
+  const qualityNeedsAck =
+    quality.phase === CAPTURE_QUALITY_PHASES.BORDERLINE ||
+    (quality.phase === CAPTURE_QUALITY_PHASES.FAIL && quality.report?.overrideAllowed);
+  const canStartReconstruction =
+    quality.phase === CAPTURE_QUALITY_PHASES.PASS ||
+    quality.phase === CAPTURE_QUALITY_PHASES.UNAVAILABLE ||
+    quality.phase === CAPTURE_QUALITY_PHASES.ERROR ||
+    (qualityNeedsAck && qualityAck);
+  const startButtonLabel =
+    quality.phase === CAPTURE_QUALITY_PHASES.ANALYZING ? 'Analyzing Capture Quality…'
+    : qualityBlocksStart ? 'Recapture Required'
+    : qualityNeedsAck ? 'Start Reconstruction Anyway'
+    : 'Start Reconstruction';
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-4 relative overflow-hidden">
@@ -94,7 +150,9 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
       </div>
 
       {/* SCAN MODE */}
-      <div className="flex bg-slate-900/80 p-1 rounded-xl border border-slate-700 mb-6 relative z-10">
+      <div className={`flex bg-slate-900/80 p-1 rounded-xl border border-slate-700 mb-6 relative z-10 ${
+        stagedFiles ? 'opacity-50 pointer-events-none' : ''
+      }`}>
         <button
           onClick={() => setScanMode('turntable')}
           className={`flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-medium transition-all ${
@@ -113,7 +171,9 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
         </button>
       </div>
 
-      <div className="w-full max-w-3xl space-y-3 relative z-10 mb-4">
+      <div className={`w-full max-w-3xl space-y-3 relative z-10 mb-4 ${
+        stagedFiles ? 'opacity-50 pointer-events-none' : ''
+      }`}>
 
         {/* WEIGHT INPUT */}
         <div className="bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-3 flex items-center gap-3 backdrop-blur-md">
@@ -284,7 +344,9 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
       </div>
 
       {/* RECORDING GUIDE */}
-      <div className="w-full max-w-3xl relative z-10 mb-3">
+      <div className={`w-full max-w-3xl relative z-10 mb-3 ${
+        stagedFiles ? 'opacity-50 pointer-events-none' : ''
+      }`}>
         <button
           onClick={() => setGuideOpen(v => !v)}
           className="flex items-center gap-2 w-full px-4 py-2.5 rounded-xl bg-slate-900/60 border border-slate-700 text-slate-400 hover:text-cyan-400 hover:border-cyan-500/50 transition-all text-sm"
@@ -339,49 +401,103 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
         )}
       </div>
 
-      {/* DROP ZONE */}
+      {/* DROP ZONE / CAPTURE QUALITY REVIEW */}
       <div className="w-full max-w-3xl relative z-10">
-        <label
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className={`
-            relative flex flex-col items-center justify-center w-full h-64 rounded-3xl cursor-pointer
-            transition-all duration-500 border-2 border-dashed group overflow-hidden
-            ${isDragging
-              ? 'border-cyan-400 bg-cyan-900/20 scale-[1.02]'
-              : 'border-slate-700 bg-slate-900/40 hover:border-cyan-500/50'
-            }
-          `}
-        >
-          <div className="flex flex-col items-center justify-center pt-5 pb-6 relative z-10">
-            <div className={`p-5 rounded-2xl mb-4 transition-all duration-500 ${
-              isDragging
-                ? 'bg-cyan-500 text-black'
-                : 'bg-slate-800 text-cyan-400 group-hover:bg-cyan-500 group-hover:text-white'
-            }`}>
-              <UploadCloud className="w-10 h-10" />
+        {!stagedFiles ? (
+          <label
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`
+              relative flex flex-col items-center justify-center w-full h-64 rounded-3xl cursor-pointer
+              transition-all duration-500 border-2 border-dashed group overflow-hidden
+              ${isDragging
+                ? 'border-cyan-400 bg-cyan-900/20 scale-[1.02]'
+                : 'border-slate-700 bg-slate-900/40 hover:border-cyan-500/50'
+              }
+            `}
+          >
+            <div className="flex flex-col items-center justify-center pt-5 pb-6 relative z-10">
+              <div className={`p-5 rounded-2xl mb-4 transition-all duration-500 ${
+                isDragging
+                  ? 'bg-cyan-500 text-black'
+                  : 'bg-slate-800 text-cyan-400 group-hover:bg-cyan-500 group-hover:text-white'
+              }`}>
+                <UploadCloud className="w-10 h-10" />
+              </div>
+              <p className="mb-1 text-xl text-slate-200 font-medium">
+                Drop your 4 videos here
+              </p>
+              <p className="text-sm text-slate-500">
+                2× at 0° (normal) · 2× at 45° (gem flipped)
+              </p>
+              <p className="text-xs text-slate-600 mt-1">
+                {scanMode === 'turntable'
+                  ? 'Background removed automatically'
+                  : 'Uses environment for tracking'}
+              </p>
             </div>
-            <p className="mb-1 text-xl text-slate-200 font-medium">
-              Drop your 4 videos here
-            </p>
-            <p className="text-sm text-slate-500">
-              2× at 0° (normal) · 2× at 45° (gem flipped)
-            </p>
-            <p className="text-xs text-slate-600 mt-1">
-              {scanMode === 'turntable'
-                ? 'Background removed automatically'
-                : 'Uses environment for tracking'}
-            </p>
+            <input
+              type="file"
+              className="hidden"
+              accept="video/*,image/*"
+              onChange={handleInput}
+              multiple
+            />
+          </label>
+        ) : (
+          <div className="rounded-3xl border-2 border-slate-700 bg-slate-900/40 p-5 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-slate-200">
+                  {stagedFiles.length} video{stagedFiles.length > 1 ? 's' : ''} selected
+                </p>
+                <p className="text-xs text-slate-500">Reviewing capture quality before reconstruction starts.</p>
+              </div>
+              <button
+                onClick={chooseDifferentVideos}
+                className="shrink-0 text-xs text-slate-400 hover:text-cyan-400 underline underline-offset-2"
+              >
+                Choose different videos
+              </button>
+            </div>
+
+            <CaptureQualityPanel phase={quality.phase} report={quality.report} message={quality.message} />
+
+            {qualityNeedsAck && (
+              <label className="flex items-start gap-2 text-xs text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={qualityAck}
+                  onChange={(e) => setQualityAck(e.target.checked)}
+                  className="mt-0.5 accent-amber-400"
+                />
+                <span>
+                  {quality.phase === CAPTURE_QUALITY_PHASES.FAIL
+                    ? 'I understand this capture failed quality screening and want to proceed anyway.'
+                    : 'I understand reconstruction may be incomplete and want to continue.'}
+                </span>
+              </label>
+            )}
+
+            {qualityBlocksStart && (
+              <p className="text-xs text-red-400">
+                Recapture recommended — reconstruction is blocked for this capture set.
+              </p>
+            )}
+
+            <button
+              onClick={startReconstruction}
+              disabled={!canStartReconstruction}
+              className="w-full flex items-center justify-center gap-2 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:cursor-not-allowed text-white py-3 rounded-xl font-bold transition-colors"
+            >
+              {quality.phase === CAPTURE_QUALITY_PHASES.ANALYZING && (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              )}
+              {startButtonLabel}
+            </button>
           </div>
-          <input
-            type="file"
-            className="hidden"
-            accept="video/*,image/*"
-            onChange={handleInput}
-            multiple
-          />
-        </label>
+        )}
 
         {/* RECOVER JOB */}
         <div className="mt-4 flex gap-2">
