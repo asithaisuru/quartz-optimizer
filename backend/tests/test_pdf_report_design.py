@@ -74,7 +74,8 @@ def rich_stats(gem_count=4):
             "projected_waste_percent": 59.6,
             "reduction_vs_baseline_percent": -24.6,
             "note": (
-                "Positive values mean lower waste than the configured baseline."
+                "Positive values mean lower waste than the assumed internal "
+                "reference. Not a validated traditional-cutting comparison."
             ),
         },
         "defect_summary": {
@@ -217,6 +218,15 @@ class PdfReportDesignTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
 
         self.assertNotIn(b"Research Proposal Alignment", content)
+
+    def test_waste_reference_is_not_labeled_as_traditional_baseline(self):
+        temporary, content, _ = self.generate(rich_stats())
+        self.addCleanup(temporary.cleanup)
+
+        self.assertIn(b"Internal reference waste", content)
+        self.assertIn(b"Difference vs reference", content)
+        self.assertIn(b"Not a validated traditional-cutting comparison", content)
+        self.assertNotIn(b"Traditional baseline", content)
 
     def test_missing_optional_data_does_not_break_rendering(self):
         temporary, content, filename = self.generate({})

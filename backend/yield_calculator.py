@@ -732,7 +732,10 @@ def calculate_gem_stats(
             "traditional_waste_baseline_percent": round(TRADITIONAL_WASTE_BASELINE, 1),
             "projected_waste_percent": projected_waste,
             "reduction_vs_baseline_percent": round(TRADITIONAL_WASTE_BASELINE - projected_waste, 1),
-            "note": "Positive values mean lower waste than the configured baseline."
+            "note": (
+                "Positive values mean lower waste than the assumed internal "
+                "reference. Not a validated traditional-cutting comparison."
+            )
         }
 
         # Rough stone dimensions in mm

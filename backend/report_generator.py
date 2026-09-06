@@ -89,6 +89,21 @@ def _has_value(value):
     return value is not None and value != ""
 
 
+def _waste_reference_note(waste):
+    boundary = "Not a validated traditional-cutting comparison."
+    if not isinstance(waste, dict):
+        return boundary
+    note = waste.get("note")
+    if not _has_value(note):
+        if _has_value(waste.get("traditional_waste_baseline_percent")):
+            return boundary
+        return None
+    text = _safe_text(note)
+    if boundary.casefold() in text.casefold():
+        return text
+    return f"{text} {boundary}"
+
+
 def _format_number(value, digits=1, suffix=""):
     if not _has_value(value):
         return "Unavailable"
@@ -730,7 +745,14 @@ def _write_optimization_summary(pdf, stats):
             ))
         _styled_table(
             pdf,
-            ["Verified strategy", "Gems", "Weight", "Yield", "Utilization", "Yield vs baseline"],
+            [
+                "Verified strategy",
+                "Gems",
+                "Weight",
+                "Yield",
+                "Utilization",
+                "Yield vs internal baseline",
+            ],
             [48, 15, 27, 23, 27, 42],
             strategy_rows,
             aligns=["L", "R", "R", "R", "R", "R"],
@@ -743,7 +765,7 @@ def _write_optimization_summary(pdf, stats):
             (
                 "Projected waste",
                 _format_number(waste.get("projected_waste_percent"), 1, "%"),
-                "Traditional baseline",
+                "Internal reference waste",
                 _format_number(
                     waste.get("traditional_waste_baseline_percent"),
                     1,
@@ -751,7 +773,7 @@ def _write_optimization_summary(pdf, stats):
                 ),
             ),
             (
-                "Difference vs baseline",
+                "Difference vs reference",
                 _format_number(
                     waste.get("reduction_vs_baseline_percent"),
                     1,
@@ -853,7 +875,12 @@ def _write_optimization_summary(pdf, stats):
         ],
         aligns=["L", "R", "L", "R"],
     )
-    _callout(pdf, "Waste comparison context", waste.get("note"), kind="info")
+    _callout(
+        pdf,
+        "Internal waste-reference context",
+        _waste_reference_note(waste),
+        kind="info",
+    )
     _callout(
         pdf,
         "Remaining free-space result",
@@ -1297,7 +1324,7 @@ def _write_notes_and_limitations(pdf, stats):
     pocket = diagnostics.get("pocket_fill") or {}
 
     for title, value in (
-        ("Waste comparison", waste.get("note")),
+        ("Internal waste reference", _waste_reference_note(waste)),
         ("Defect evidence", summary.get("claim_boundary")),
         ("Detection policy", detection.get("reason")),
         ("Remaining free space", pocket.get("unused_space_reason")),
