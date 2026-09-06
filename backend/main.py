@@ -32,6 +32,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from typing import List, Optional
 from dotenv import load_dotenv
 
+from capture_quality_api import router as capture_quality_router
 from yield_calculator import calculate_gem_stats
 from report_generator import create_pdf, find_existing_pdf, is_valid_pdf
 
@@ -60,6 +61,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"]
 )
 app.mount("/files", StaticFiles(directory=JOBS_DIR), name="files")
+app.include_router(capture_quality_router)
 
 
 @app.on_event("startup")

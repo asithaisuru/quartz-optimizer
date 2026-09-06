@@ -31,6 +31,10 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from video_utils import extract_best_frames, get_sharpness  # noqa: E402
+from capture_quality import (  # noqa: E402
+    analyze_capture_set as shared_analyze_capture_set,
+    production_settings as shared_production_settings,
+)
 
 
 OUT_DIR = REPO_ROOT / "final_research_evidence" / "reconstruction_multi"
@@ -143,6 +147,10 @@ def json_ready(value: Any) -> Any:
 
 
 def production_settings() -> ProductionSettings:
+    return shared_production_settings()
+
+
+def _legacy_production_settings() -> ProductionSettings:
     source = inspect.getsource(extract_best_frames)
     signature = inspect.signature(extract_best_frames)
     target_default = signature.parameters["target_frames"].default
@@ -704,56 +712,14 @@ def folder_status(discovery: dict[str, Any], readable: bool) -> str:
 
 def analyze_specimen(folder: Path, settings: ProductionSettings, force_sequential: bool) -> dict[str, Any]:
     discovery = discover_specimen(folder)
-    videos: dict[str, dict[str, Any]] = {}
-    for stem in EXPECTED_VIDEO_STEMS:
-        path = discovery["selected_videos"].get(stem)
-        if path is None:
-            continue
-        videos[stem] = analyze_video(path, stem, settings, force_sequential)
-
-    overlaps: dict[str, dict[str, Any]] = {}
-    for left, right in zip(EXPECTED_VIDEO_STEMS, EXPECTED_VIDEO_STEMS[1:]):
-        pair_name = f"{left}_{right}"
-        if left in videos and right in videos:
-            overlaps[pair_name] = overlap_metrics(
-                videos[left].get("_orb_features", []),
-                videos[right].get("_orb_features", []),
-            )
-        else:
-            overlaps[pair_name] = {"max": 0, "median": 0.0, "pairs": 0}
-
-    expected_total = sum(int(video.get("expected_extracted_frames") or 0) for video in videos.values())
-    candidate_total = sum(int(video.get("readable_candidate_count") or 0) for video in videos.values())
-    pass_total = sum(int(video.get("normal_sharp_gate_pass_count") or 0) for video in videos.values())
-    duplicate_pairs = sum(int(video.get("duplicate_pairs") or 0) for video in videos.values())
-    adjacent_pairs = sum(int(video.get("adjacent_pairs") or 0) for video in videos.values())
-    all_sharpness = []
-    for video in videos.values():
-        for sample in video.get("_samples", []):
-            all_sharpness.append(sample.sharpness)
-
-    readable = len(videos) == 4 and all(video.get("file_readable") for video in videos.values())
-    specimen: dict[str, Any] = {
-        **{key: value for key, value in discovery.items() if key != "selected_videos"},
-        "video_count": len(videos),
-        "readable": readable,
-        "folder_status": "",
-        "videos": videos,
-        "expected_frame_total": expected_total,
-        "fallback_count": sum(1 for video in videos.values() if video.get("fallback_triggered")),
-        "sharp_gate_pass_percent": percent(pass_total, candidate_total),
-        "overall_median_sharpness": median(all_sharpness),
-        "overall_p25_sharpness": percentile(all_sharpness, 25),
-        "overall_p75_sharpness": percentile(all_sharpness, 75),
-        "duplicate_rate": (duplicate_pairs / adjacent_pairs) if adjacent_pairs else None,
-        "overlap": overlaps,
-    }
-    specimen["folder_status"] = folder_status(discovery, readable)
-    screen, reason, score = classification_and_score(specimen)
-    specimen["capture_screen"] = screen
-    specimen["reason"] = reason
-    specimen["quality_score"] = score
-    return specimen
+    metadata = {key: value for key, value in discovery.items()
+                if key != "selected_videos"}
+    return shared_analyze_capture_set(
+        discovery["selected_videos"],
+        settings=settings,
+        force_sequential=force_sequential,
+        metadata=metadata,
+    )
 
 
 def csv_row(specimen: dict[str, Any]) -> dict[str, Any]:
