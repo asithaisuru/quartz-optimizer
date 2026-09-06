@@ -702,9 +702,14 @@ export default function ResultDashboard({
               <span>Waste: {wasteReduction?.projected_waste_percent ?? (100 - currentYield).toFixed(1)}%</span>
             </div>
             {wasteReduction?.traditional_waste_baseline_percent !== undefined && (
-              <p className={`text-[10px] mt-2 ${wasteDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {wasteDelta >= 0 ? '+' : ''}{wasteDelta} pts vs {wasteReduction.traditional_waste_baseline_percent}% baseline waste
-              </p>
+              <>
+                <p className={`text-[10px] mt-2 ${wasteDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {wasteDelta >= 0 ? '+' : ''}{wasteDelta} pts vs {wasteReduction.traditional_waste_baseline_percent}% assumed baseline
+                </p>
+                <p className="text-[9px] text-slate-600 mt-0.5">
+                  Internal reference figure, not a validated traditional-cutting comparison
+                </p>
+              </>
             )}
           </div>
 
