@@ -75,6 +75,38 @@ class CutSequenceTests(unittest.TestCase):
             "gem_1", "gem_2", "gem_3", "gem_4",
         })
 
+    def test_cut_order_is_deterministic_for_same_layout(self):
+        gems = [
+            box_at((-1.2, -1.2, 0)),
+            box_at((-1.2, 1.2, 0)),
+            box_at((1.2, -1.2, 0)),
+            box_at((1.2, 1.2, 0)),
+        ]
+        first = plan_cut_sequence(self.rough, gems, **self.common)
+        second = plan_cut_sequence(self.rough, gems, **self.common)
+
+        self.assertEqual(first["status"], "complete")
+        self.assertEqual(second["status"], "complete")
+        first_steps = [
+            (
+                step["plane"]["normal"],
+                step["plane"]["offset"],
+                step["negative_side_gems"],
+                step["positive_side_gems"],
+            )
+            for step in first["sequence"]
+        ]
+        second_steps = [
+            (
+                step["plane"]["normal"],
+                step["plane"]["offset"],
+                step["negative_side_gems"],
+                step["positive_side_gems"],
+            )
+            for step in second["sequence"]
+        ]
+        self.assertEqual(first_steps, second_steps)
+
     def test_intersecting_envelopes_are_not_separable(self):
         gems = [box_at((0, 0, 0), (1.4, 1.4, 1.4)),
                 box_at((0, 0, 0), (0.7, 0.7, 0.7))]

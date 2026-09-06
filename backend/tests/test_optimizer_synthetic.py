@@ -19,6 +19,7 @@ if trimesh is not None:
         _beam_pack,
         _fit_settings,
         _make_no_cut_mask,
+        _normalize_preferred_shape,
         _spacing_voxels,
     )
 else:
@@ -26,6 +27,7 @@ else:
     _beam_pack = None
     _fit_settings = None
     _make_no_cut_mask = None
+    _normalize_preferred_shape = None
     _spacing_voxels = None
 
 
@@ -50,6 +52,16 @@ class OptimizerSyntheticTests(unittest.TestCase):
         self.assertGreater(best["total_volume"], 0)
         util = best["diagnostics"]["space_utilization"]
         self.assertGreater(util["occupied_percent"], 20)
+
+    def test_auto_shape_alias_keeps_unrestricted_search(self):
+        self.assertIsNone(_normalize_preferred_shape(None))
+        self.assertIsNone(_normalize_preferred_shape(""))
+        self.assertIsNone(_normalize_preferred_shape("Auto"))
+        self.assertIsNone(_normalize_preferred_shape(" auto "))
+        self.assertEqual(
+            _normalize_preferred_shape("Emerald Cut"),
+            "Emerald Cut",
+        )
 
     def test_ellipsoid_multi_returns_valid_strategy(self):
         rough = trimesh.creation.icosphere(subdivisions=3, radius=0.5)

@@ -160,6 +160,15 @@ def _normalize(v):
     return v / n if n > 1e-9 else v
 
 
+def _normalize_preferred_shape(preferred_shape):
+    if preferred_shape is None:
+        return None
+    value = str(preferred_shape).strip()
+    if not value or value.lower() == "auto":
+        return None
+    return value
+
+
 def _build_sdf_grid(rough, res=SDF_RESOLUTION, bias_vox=SDF_BIAS_VOXELS, pad=3):
     pitch = float(np.max(rough.extents)) / res
     vox = rough.voxelized(pitch).fill()
@@ -2613,6 +2622,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                  extra_gem_policy=DEFAULT_EXTRA_GEM_POLICY,
                  max_gems=MAX_GEMS, preform_margin_mm=None,
                  max_cut_depth_mm=None):
+    preferred_shape = _normalize_preferred_shape(preferred_shape)
     print(f"--- Optimizer | mode={mode} | shape={preferred_shape or 'auto'} ---")
     t0 = time.time()
 

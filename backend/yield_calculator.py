@@ -21,6 +21,8 @@ from research_completion import (
 
 DENSITY_QUARTZ = 2.65   # g/cm³
 CARATS_PER_GRAM = 5.0
+DEFAULT_PREFORM_MARGIN_MM = 0.5
+DEFAULT_MAX_CUT_DEPTH_MM = 60.0
 
 
 def _traditional_waste_baseline():
@@ -79,11 +81,11 @@ def _optimizer_config(overrides=None):
         ),
         "preform_margin_mm": _optional_float(
             overrides.get("preform_margin_mm"),
-            None,
+            DEFAULT_PREFORM_MARGIN_MM,
         ),
         "max_cut_depth_mm": _optional_float(
             overrides.get("max_cut_depth_mm"),
-            None,
+            DEFAULT_MAX_CUT_DEPTH_MM,
         ),
         "extra_gem_policy": overrides.get("extra_gem_policy") or policy,
         "min_secondary_carat": _optional_float(
