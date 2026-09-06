@@ -23,6 +23,8 @@ scipy==1.15.3
 # Triangulation engine trimesh needs to cap sliced sub-volume meshes
 # (used by the leaf-piece repacking pass in optimizer.py)
 mapbox_earcut==2.0.0
+# Polygon operations used by trimesh.slice_mesh_plane(..., cap=True)
+shapely==2.1.2
 
 # Note: PyTorch and Rtree are installed via specific commands in README
 # to ensure GPU support and C++ bindings are correct.
