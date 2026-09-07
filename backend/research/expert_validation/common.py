@@ -22,11 +22,14 @@ SYSTEM_YIELD_RESULTS = (
 )
 OUTPUT_DIR = ROOT / "final_research_evidence" / "expert_validation"
 EXPERT_RESPONSE_TEMPLATE = OUTPUT_DIR / "expert_response_template.csv"
+FORM_B_RESPONSE_TEMPLATE = Path(__file__).resolve().parent / "form_b_response_template.csv"
+FORM_B_RESPONSE_VALIDATION = OUTPUT_DIR / "form_b_response_validation.json"
 COMPARISON_RESULTS = OUTPUT_DIR / "comparison_results.csv"
 COMPARISON_SUMMARY = OUTPUT_DIR / "comparison_summary.json"
 COMPARISON_REPORT = OUTPUT_DIR / "comparison_report.md"
 
 FORM_A_VERSION = "objective3_external_expert_form_a_v1"
+FORM_B_VERSION = "objective3_post_system_form_b_v1"
 COMPARISON_LABEL = "SYSTEM vs INDEPENDENT EXPERT/TRADITIONAL CUTTER"
 PROPOSAL_TARGET_WASTE_REDUCTION_PERCENT = 15.0
 
@@ -60,6 +63,29 @@ EXPERT_RESPONSE_FIELDS = [
     "notes",
 ]
 
+FORM_B_RESPONSE_FIELDS = [
+    "form_b_response_id",
+    "submitted_at",
+    "expert_id",
+    "expert_name_or_code",
+    "form_a_response_id",
+    "form_a_completed_before_system_shown",
+    "consent_post_system_comparison",
+    "form_version",
+    "specimen_id",
+    "system_plan_reviewed",
+    "system_plan_manufacturability",
+    "manufacturing_risks_or_practical_concerns",
+    "changes_expert_would_make_to_system_plan",
+    "revised_retained_weight_estimate_ct",
+    "revised_gem_count",
+    "revised_recommended_cut_shape",
+    "system_orientation_acceptable",
+    "orientation_disagreement_explanation",
+    "feasibility_confidence_1_to_5",
+    "overall_comments",
+]
+
 COMPARISON_FIELDS = [
     "response_id",
     "expert_id",
@@ -90,23 +116,36 @@ COMPARISON_FIELDS = [
 
 FORM_B_QUESTIONS = [
     {
-        "id": "form_a_frozen_confirmation",
+        "id": "form_a_completed_before_system_shown",
         "prompt": (
-            "Confirm that your Form A recommendation for this specimen was "
-            "completed and frozen before reviewing any system output."
+            "Confirm that your Form A recommendation was completed and frozen "
+            "before any system result was shown."
         ),
         "answer_format": "YES/NO",
     },
     {
-        "id": "system_plan_feasibility",
+        "id": "consent_post_system_comparison",
         "prompt": (
-            "After reviewing the system plan for this specimen, is the plan "
-            "manufacturable using ordinary gem-cutting/sawing practice?"
+            "Do you consent to having this post-system review linked to your "
+            "frozen Form A submission for supplemental analysis?"
         ),
-        "answer_format": "YES/NO/UNCERTAIN plus short rationale",
+        "answer_format": "YES/NO",
     },
     {
-        "id": "manufacturing_risks",
+        "id": "system_plan_reviewed",
+        "prompt": "Did you review the system plan for this specimen?",
+        "answer_format": "YES/NO",
+    },
+    {
+        "id": "system_plan_manufacturability",
+        "prompt": (
+            "Based on the reviewed system plan, is the plan manufacturable "
+            "using ordinary gem-cutting/sawing practice?"
+        ),
+        "answer_format": "YES/NO/UNCERTAIN",
+    },
+    {
+        "id": "manufacturing_risks_or_practical_concerns",
         "prompt": (
             "List any manufacturing risks, stability concerns, fracture/defect "
             "concerns, or missing information that would affect feasibility."
@@ -114,25 +153,59 @@ FORM_B_QUESTIONS = [
         "answer_format": "free text",
     },
     {
-        "id": "plan_adjustments",
+        "id": "changes_expert_would_make_to_system_plan",
         "prompt": (
-            "Would you change the system plan before cutting? If yes, describe "
-            "the change and the reason."
+            "Describe any changes you would make to the system plan before "
+            "cutting, or state that no changes are recommended."
         ),
-        "answer_format": "NO or free text",
+        "answer_format": "free text",
     },
     {
-        "id": "post_review_retained_weight_estimate_ct",
+        "id": "revised_retained_weight_estimate_ct",
         "prompt": (
-            "If you would change the plan, provide your estimated retained "
-            "finished weight in carats; otherwise leave blank."
+            "If your changes alter the retained finished weight estimate, "
+            "provide the revised estimate in carats; otherwise leave blank."
         ),
         "answer_format": "number or blank",
     },
     {
+        "id": "revised_gem_count",
+        "prompt": (
+            "If your changes alter the finished gem count, provide the revised "
+            "count; otherwise leave blank."
+        ),
+        "answer_format": "integer or blank",
+    },
+    {
+        "id": "revised_recommended_cut_shape",
+        "prompt": (
+            "If your changes alter the recommended cut shape, provide the "
+            "revised shape; otherwise leave blank."
+        ),
+        "answer_format": "text or blank",
+    },
+    {
+        "id": "system_orientation_acceptable",
+        "prompt": "Is the system orientation acceptable for this specimen?",
+        "answer_format": "YES/NO/UNCERTAIN",
+    },
+    {
+        "id": "orientation_disagreement_explanation",
+        "prompt": (
+            "If you disagree with the system orientation, explain the practical "
+            "or manufacturing basis for the disagreement."
+        ),
+        "answer_format": "free text or blank",
+    },
+    {
         "id": "feasibility_confidence_1_to_5",
-        "prompt": "How confident are you in your feasibility assessment?",
+        "prompt": "How confident are you in this feasibility assessment?",
         "answer_format": "integer 1-5",
+    },
+    {
+        "id": "overall_comments",
+        "prompt": "Provide any overall comments on the reviewed system plan.",
+        "answer_format": "free text or blank",
     },
 ]
 

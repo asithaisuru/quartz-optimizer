@@ -12,6 +12,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 from research.expert_validation import common as expert_common  # noqa: E402
 from research.expert_validation import compare_system_vs_expert  # noqa: E402
+from research.expert_validation import validate_form_b_responses  # noqa: E402
 from research.expert_validation import validate_expert_responses  # noqa: E402
 from research.optimizer_validation import run_system_yield_validation  # noqa: E402
 
@@ -318,6 +319,32 @@ class Objective3ValidationWorkflowTests(unittest.TestCase):
         row.update(overrides)
         return row
 
+    def _form_b_row(self, specimen_id="QZ-01", **overrides):
+        row = {
+            "form_b_response_id": "b1",
+            "submitted_at": "2026-09-07T00:00:00Z",
+            "expert_id": "expert-a",
+            "expert_name_or_code": "Expert A",
+            "form_a_response_id": "r1",
+            "form_a_completed_before_system_shown": "YES",
+            "consent_post_system_comparison": "YES",
+            "form_version": expert_common.FORM_B_VERSION,
+            "specimen_id": specimen_id,
+            "system_plan_reviewed": "YES",
+            "system_plan_manufacturability": "UNCERTAIN",
+            "manufacturing_risks_or_practical_concerns": "Potential stability concern near pavilion.",
+            "changes_expert_would_make_to_system_plan": "No changes recommended.",
+            "revised_retained_weight_estimate_ct": "",
+            "revised_gem_count": "",
+            "revised_recommended_cut_shape": "",
+            "system_orientation_acceptable": "YES",
+            "orientation_disagreement_explanation": "",
+            "feasibility_confidence_1_to_5": "4",
+            "overall_comments": "",
+        }
+        row.update(overrides)
+        return row
+
     def test_expert_workflow_excludes_diagnostic_system_rows_from_primary_claim(self):
         self._patch_expert_system_results()
 
@@ -388,6 +415,125 @@ class Objective3ValidationWorkflowTests(unittest.TestCase):
         self.assertEqual(script_headers, expert_common.EXPERT_RESPONSE_FIELDS)
         self.assertIn("before reviewing any system or optimizer result", script)
         self.assertNotIn("Form B", script)
+
+    def test_form_b_schema_and_template_are_separate_from_form_a(self):
+        template = (
+            BACKEND_DIR
+            / "research"
+            / "expert_validation"
+            / "form_b_response_template.csv"
+        )
+        headers = next(csv.reader(template.read_text(encoding="utf-8").splitlines()))
+
+        self.assertEqual(headers, expert_common.FORM_B_RESPONSE_FIELDS)
+        self.assertNotEqual(headers, expert_common.EXPERT_RESPONSE_FIELDS)
+        self.assertIn("form_a_response_id", headers)
+        self.assertIn("system_plan_manufacturability", headers)
+        self.assertNotIn("recommended_cut_shape", headers)
+
+    def test_form_b_validation_accepts_matching_completed_form_a_linkage(self):
+        summary = validate_form_b_responses.validate_rows(
+            [self._form_b_row("QZ-01")],
+            [self._expert_row("QZ-01")],
+        )
+
+        self.assertTrue(summary["valid_post_system_review"])
+        self.assertFalse(summary["valid_as_independent_evidence"])
+        self.assertEqual(summary["linked_form_b_rows"], 1)
+        self.assertEqual(summary["completed_form_a_rows_available"], 1)
+
+    def test_form_b_validation_rejects_missing_form_a_linkage(self):
+        summary = validate_form_b_responses.validate_rows(
+            [self._form_b_row("QZ-01", form_a_response_id="missing")],
+            [self._expert_row("QZ-01")],
+        )
+
+        self.assertFalse(summary["valid_post_system_review"])
+        self.assertTrue(any(
+            error["field"] == "form_a_response_id"
+            for error in summary["errors"]
+        ))
+
+    def test_form_b_validation_parses_neutral_choices_and_specimen_set(self):
+        neutral = validate_form_b_responses.validate_rows(
+            [
+                self._form_b_row(
+                    "QZ-03",
+                    form_a_response_id="",
+                    form_a_completed_before_system_shown=" yes ",
+                    consent_post_system_comparison=" yes ",
+                    system_plan_reviewed=" yes ",
+                    system_plan_manufacturability=" uncertain ",
+                    system_orientation_acceptable=" no ",
+                    orientation_disagreement_explanation="Sawing approach would rotate away from the stable face.",
+                )
+            ],
+            [self._expert_row("QZ-03")],
+        )
+        removed = validate_form_b_responses.validate_rows(
+            [self._form_b_row("QZ-09")],
+            [self._expert_row("QZ-09")],
+        )
+
+        self.assertTrue(neutral["valid_post_system_review"])
+        self.assertFalse(neutral["valid_as_independent_evidence"])
+        self.assertTrue(any(
+            "form_a_response_id is blank" in warning
+            for warning in neutral["warnings"]
+        ))
+        self.assertFalse(removed["valid_post_system_review"])
+        self.assertTrue(any(
+            error["field"] == "specimen_id"
+            for error in removed["errors"]
+        ))
+
+    def test_form_b_script_uses_final_specimens_backend_schema_and_neutral_text(self):
+        script = (
+            BACKEND_DIR
+            / "research"
+            / "expert_validation"
+            / "form_b_post_system_google_apps_script.gs"
+        ).read_text(encoding="utf-8")
+
+        specimen_block = re.search(
+            r"const FINAL_SPECIMENS = Object\.freeze\(\[(.*?)\]\);",
+            script,
+            re.S,
+        ).group(1)
+        final_specimens = re.findall(r'"(QZ-\d+)"', specimen_block)
+        self.assertEqual(
+            final_specimens,
+            ["QZ-01", "QZ-03", "QZ-05", "QZ-08", "QZ-14"],
+        )
+        self.assertNotIn("QZ-09", final_specimens)
+        self.assertNotIn("QZ-30", final_specimens)
+
+        header_block = re.search(
+            r"const SCHEMA_HEADERS = Object\.freeze\(\[(.*?)\]\);",
+            script,
+            re.S,
+        ).group(1)
+        script_headers = re.findall(r'"([^"]+)"', header_block)
+        self.assertEqual(script_headers, expert_common.FORM_B_RESPONSE_FIELDS)
+
+        lowered_script = script.lower()
+        self.assertNotIn("is the system better", lowered_script)
+        self.assertNotIn("is ai more accurate", lowered_script)
+        self.assertNotIn("proposal target", lowered_script)
+
+    def test_form_b_rows_do_not_mix_with_independent_form_a_comparison(self):
+        with self.assertRaises(ValueError):
+            compare_system_vs_expert.compare_rows([self._form_b_row("QZ-01")])
+
+        summary = validate_form_b_responses.validate_rows(
+            [self._form_b_row("QZ-01")],
+            [self._expert_row("QZ-01")],
+        )
+        self.assertFalse(summary["valid_as_independent_evidence"])
+        self.assertIn(
+            "do not aggregate it with independent Form A",
+            summary["independent_evidence_boundary"],
+        )
 
 
 if __name__ == "__main__":
