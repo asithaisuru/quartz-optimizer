@@ -161,17 +161,21 @@ class RecoveryTests(unittest.TestCase):
             self.assertAlmostEqual(sum(r["retained_weight_ct"] for r in result["regions"]),
                                    result["retained_preform_weight_ct"])
             for region in result["regions"]:
-                mesh = trimesh.load(Path(tmp) / region["mesh_file"], force="mesh")
+                mesh = trimesh.load(Path(tmp) / region["mesh_file"], process=False)
                 self.assertTrue(mesh.is_watertight)
                 self.assertAlmostEqual(abs(mesh.volume), region["volume_mesh_units"], places=5)
             inset = self.run_box(tmp, request={"rough_inset_mm": 2, "max_regions": 1})
-            self.assertLess(inset["preform_recovery_percent"], result["preform_recovery_percent"])
+            self.assertAlmostEqual(inset["preform_recovery_percent"], result["preform_recovery_percent"])
+            self.assertGreater(inset["recovery_accounting"]["virtual_safety_excluded_ct"],
+                               result["recovery_accounting"]["virtual_safety_excluded_ct"])
 
     def test_manufacturing_invalid_splits_never_selected(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_box(tmp, request={"max_cut_depth_mm": .01})
             self.assertEqual(result["cuts"], [])
-            self.assertEqual(result["manufacturing_status"], "no_separation_required")
+            self.assertEqual(result["manufacturing_status"], "no_verified_plan")
+            self.assertEqual(result["physical_retention_percent"], 100)
+            self.assertEqual(result["usable_preform_recovery_percent"], 0)
             self.assertTrue(result["geometric_comparisons"])
             self.assertTrue(result["diagnostics"]["manufacturing_rejections"])
 
@@ -186,24 +190,32 @@ class RecoveryTests(unittest.TestCase):
             self.assertGreater(len(result["cuts"]), 0)
             self.assertTrue(result["manufacturing_plan"]["diagnostics"]["exact_sequence_verified"])
             self.assertGreater(result["estimated_kerf_loss_ct"], 0)
+            self.assertGreater(result["diagnostics"]["usable_plan_count"], 0)
+            self.assertTrue(result["discarded_regions"])
+            for rejected in result["discarded_regions"]:
+                self.assertIn("suggested_finish_shapes", rejected)
+                self.assertFalse(rejected["usable"])
+                self.assertEqual(rejected["usable_preform_weight_ct"], 0)
+                self.assertTrue(rejected["rejection_reasons"])
             self.assertLess(result["settings"]["blade_kerf_mm"] if "settings" in result else .5,
                             result["diagnostics"]["pitch_mm"])
             self.assertLessEqual(result["retained_preform_weight_ct"] + result["estimated_kerf_loss_ct"], 100)
             scale = result["coordinate_frame"]["mm_per_mesh_unit"]
             for region in result["regions"]:
-                mesh = trimesh.load(Path(tmp) / region["mesh_file"], force="mesh")
+                mesh = trimesh.load(Path(tmp) / region["mesh_file"], process=False)
                 self.assertFalse(safety_mask(mesh.vertices * scale, [ellipsoid()], 0).any())
             self.assertIsNone(result["target_met"])
 
-    def test_external_annotation_does_not_disable_target(self):
+    def test_confirmed_inclusion_disables_target_even_outside_rough(self):
         annotation = ellipsoid()
         annotation["geometry"]["center_mm"] = [10000, 10000, 10000]
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_box(tmp, [annotation], request={"max_regions": 1})
-            self.assertTrue(result["target_applicable"])
+            self.assertFalse(result["target_applicable"])
+            self.assertIsNone(result["target_met"])
             self.assertEqual(result["confirmed_defect_excluded_ct"], 0)
 
-    def test_disconnected_inset_is_not_one_uncut_preform(self):
+    def test_disconnected_safety_core_does_not_cut_connected_physical_rough(self):
         occupied = np.zeros((15, 5, 5), dtype=bool)
         occupied[:5] = True
         occupied[10:] = True
@@ -214,9 +226,12 @@ class RecoveryTests(unittest.TestCase):
             result = optimize_preforms(rough, 100,
                                       {"rough_inset_mm": 2.0, "max_regions": 1},
                                       {"annotations": []}, tmp, resolution=30, candidate_limit=4)
-            # The narrow neck disappears under the inset; a single-leaf plan
-            # must not present disconnected retained pieces as one uncut stone.
-            self.assertNotEqual(result["manufacturing_status"], "no_separation_required")
+            # Erosion does not remove physical material. The strong physical neck
+            # requires partition testing, unavailable at max_regions=1.
+            self.assertAlmostEqual(result["physical_retention_percent"], 100)
+            self.assertEqual(result["whole_rough_validation"]["usability_status"], "requires_further_separation")
+            self.assertEqual(result["preform_recovery_percent"], 0)
+            self.assertEqual(result["cuts"], [])
 
     def test_nonwatertight_input_rejected(self):
         mesh = trimesh.creation.box()
@@ -270,6 +285,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/jobs/missing/defect-review").status_code, 404)
         self.assertEqual(self.client.post(prefix + "/annotations", json={"type": "invalid"}).status_code, 422)
 
+    def test_api_comparison_uses_effective_promoted_report_without_rewriting_saved_data(self):
+        ext = self.job / "extended_search"
+        (ext / "result_v2").mkdir(parents=True)
+        atomic_json(ext / "results.json", {"best_result":"result_v2"})
+        promoted = ext / "result_v2" / "analysis_report.json"
+        atomic_json(promoted, {"yield_percent":34.7})
+        before = promoted.read_bytes()
+        response = self.client.post("/jobs/test-job/preform-recovery", json={"max_regions":1})
+        self.assertEqual(response.status_code, 202)
+        result = self.client.get("/jobs/test-job/preform-recovery/result").json()
+        self.assertEqual(result["legacy_faceted_yield_percent"], 34.7)
+        self.assertEqual(result["input_manifest"]["legacy_comparison_source"]["result_id"], "result_v2")
+        self.assertEqual(promoted.read_bytes(), before)
+        self.assertEqual((self.job / "analysis_report.json").read_bytes(), self.legacy)
+
     def test_real_run_polling_persistence_and_legacy_unchanged(self):
         prefix = "/jobs/test-job/preform-recovery"
         self.assertEqual(self.client.get(prefix + "/status").json()["status"], "idle")
@@ -283,6 +313,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result["legacy_faceted_yield_percent"], 26.8)
         self.assertEqual(result["target_recovery_source"], "expert_defined")
         self.assertTrue(result["regions"][0]["mesh_file"].startswith("/files/test-job/preform_recovery/"))
+        self.assertEqual(result["recovery_model_version"], "v2_usable_preform")
+        self.assertEqual(result["retained_preform_weight_ct"], result["usable_preform_weight_ct"])
+        self.assertEqual(result["preform_recovery_percent"], result["usable_preform_recovery_percent"])
+        self.assertIn("physical_retention_percent", result)
+        self.assertIn("whole_rough_validation", result)
+        self.assertIn("usable_preform_accounting", result)
         run = self.job / "preform_recovery" / run_id
         for name in ("request.json", "result.json", "status.json", "defect_review_snapshot.json", "input_manifest.json"):
             self.assertTrue((run / name).is_file())

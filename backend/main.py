@@ -446,32 +446,8 @@ def _extended_manifest_path(job_folder):
 
 
 def _resolve_effective_result(job_folder):
-    """Resolve the selected report and all of its mesh artifacts as one bundle."""
-
-    job_root = Path(job_folder)
-    result_id = "result_v1"
-    report_path = job_root / "analysis_report.json"
-    artifact_path = job_root / "dense"
-
-    manifest = _read_json_object(_extended_manifest_path(job_root))
-    extended_report = _extended_result_path(job_root)
-    extended_artifacts = extended_report.parent
-    if (
-        manifest is not None
-        and manifest.get("best_result") == "result_v2"
-        and extended_report.is_file()
-        and extended_artifacts.is_dir()
-    ):
-        result_id = "result_v2"
-        report_path = extended_report
-        artifact_path = extended_artifacts
-
-    return {
-        "result_id": result_id,
-        "report_path": report_path,
-        "artifact_path": artifact_path,
-        "report_hash": _sha256_file(report_path),
-    }
+    from effective_result import resolve_effective_result
+    return resolve_effective_result(job_folder)
 
 
 def get_effective_result(job_id):
