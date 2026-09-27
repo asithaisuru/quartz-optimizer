@@ -1,6 +1,7 @@
 """Isolated defect review and preform recovery HTTP workflow."""
 from __future__ import annotations
 
+from effective_result import resolve_effective_result
 import copy
 import math
 import re
@@ -363,13 +364,16 @@ def create_router(validate_job, jobs_root=None):
             with (run / "rough_input.ply").open("rb") as handle:
                 for block in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(block)
+            effective = resolve_effective_result(job)
+            legacy = read_json(effective["report_path"], {})
+            legacy_yield = legacy.get("yield_percent")
             atomic_json(run / "input_manifest.json", {
                 "schema_version": "1.0", "created_at": now(), "rough_weight_ct": weight,
                 "mesh_sha256": digest.hexdigest(), "source_mesh": "dense/final_textured_model.ply",
                 "defect_review_revision": snapshot["revision"],
+                "legacy_comparison_source": {"result_id": effective["result_id"],
+                                             "report_sha256": effective["report_hash"]},
             })
-            legacy = read_json(job / "analysis_report.json", {})
-            legacy_yield = legacy.get("yield_percent")
             status = {"run_id": run.name, "status": "queued", "mode": "preform_recovery",
                       "created_at": now(), "worker_pid": os.getpid()}
             with json_file_lock(job / "preform_recovery" / "status.json"):
@@ -443,4 +447,6 @@ def create_router(validate_job, jobs_root=None):
                                   message="Preform worker exited before completion; start a new run.")
                     record_status(job, job / "preform_recovery" / run_id, status)
 
+    from preform_expert_review import create_router as create_expert_review_router
+    router.include_router(create_expert_review_router(validate_job, job_lock))
     return router

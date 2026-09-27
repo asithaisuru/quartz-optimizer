@@ -5,14 +5,16 @@ shared contract remains authoritative for its explicit geometry, region, and
 recovery-result fields. Examples use symbolic JOB_ID/RUN_ID/DEF-AI-ID placeholders
 and illustrative numbers, not measured research results.
 
-The reconciliation changes serialization and validation only. The optimizer,
-legacy reports, original detector artifacts and frozen research evidence remain
-unchanged. No additional review/recovery endpoints or candidate-link field are
+New recovery runs use the V2 usable-preform model documented below. Legacy
+faceted optimization, saved V1 results, original detector artifacts and frozen
+research evidence remain unchanged. No additional review/recovery endpoints or candidate-link field are
 introduced.
 
-## Reconciliation findings and frontend actions
+## Historical reconciliation findings and frontend actions
 
-Inspected D:/project-quartz-frontend/web/frontend/src directly:
+The following findings describe the earlier frontend reconciliation, not new mismatches introduced by final V2. The current worktree frontend was re-inspected read-only; see the final V2 compatibility note below.
+
+Previously inspected D:/project-quartz-frontend/web/frontend/src directly:
 
 | Location | Finding | Required frontend behavior |
 | --- | --- | --- |
@@ -156,7 +158,7 @@ Nested geometry.ellipsoid/geometry.tube_polyline is rejected with 422.
 }
 ```
 
-A fracture requires 2â€“2000 finite points and positive radius_mm. These geometries
+A fracture requires 2-2000 finite points and positive radius_mm. These geometries
 are **expert/manual safety-zone approximations**, not exact internal volumetric
 defect reconstructions.
 
@@ -228,7 +230,7 @@ unchanged detector files does not resurrect it. Edit history remains persisted.
 
 These are the defaults. Settings reject unknown/nonfinite/negative values;
 target is within [0,100], maximum cut depth is positive, and max_regions is an
-integer 1â€“12 counting retained and discarded leaves. min_secondary_carat applies
+integer 1-12 counting retained and discarded leaves. min_secondary_carat applies
 to secondary regions. Return:
 
 ```json
@@ -263,7 +265,9 @@ result.search_state explains the search limit. Failure includes a message.
 
 ## G. Recovery result
 
-This minimal illustrative result shows all fields required by the original contract:
+This minimal V1-compatible illustration shows the original required fields. New
+V2 responses additionally include recovery_model_version and recovery_accounting
+as documented below; this is not a measured V2 zero-cut example.
 
 ```json
 {
@@ -303,9 +307,9 @@ confirmed_defect_constraints, geometric_comparisons and limitations.
 
 manufacturing_status: complete, no_separation_required, or no_verified_plan.
 search_state: bounded_search_complete or resource_limit_reached.
-target_context: defect_free or defect_constrained. Confirmed safety zones that
-intersect the rough make target_applicable=false and target_met=null.
-Otherwise target_met is a boolean based on unrounded recovery. Absence of confirmed
+target_context: defect_free or defect_constrained. Any confirmed fracture or
+inclusion makes target_applicable=false and target_met=null, independent of overlap.
+Otherwise target_met compares unrounded usable_preform_recovery_percent to the target. Absence of confirmed
 constraints is a modeling context, not proof that a physical stone is defect-free.
 
 Legacy comparison is copied from the root analysis_report.json yield_percent,
@@ -497,83 +501,315 @@ processes are preserved. This uses the existing in-process background task model
 not a durable distributed queue; process-ID reuse and abrupt task loss in a still
 living process may require operational recovery.
 
-## Algorithm and calculations
+## Algorithm and calculations (V2)
 
-The new module reuses optimizer._build_sdf_grid, scipy connected components/PCA,
-and cut_sequence's candidate directions, cut tree, full-through separation,
-clearance, defect-zone and maximum-depth verification.
+New runs return recovery_model_version="v2_usable_preform". V1 and earlier
+v2_mass_conserving saved results remain readable, with their original values
+and version labels. GET never rewrites them.
 
-1. Require a watertight canonical mesh and measured positive rough weight.
-   Both review calibration and recovery load via
-   mesh_artifacts.load_mesh_preserving_topology (Trimesh process=False).
-   Canonical selection remains dense/final_textured_model.ply; the worker reads
-   its byte-for-byte private copy. No vertex merging, repair or winding changes
-   are applied to canonical topology.
-   Center a private mesh copy and calibrate physical scale using the existing
-   quartz density (2.65 g/cm3, 5 carats/g).
-2. Build a voxel SDF; remove the rough inset and a conservative cell-boundary
-   allowance. Rasterize confirmed safety zones with preform protection and
-   voxel-size padding. Provisional/rejected records never enter this mask.
-3. Consider connected components and PCA/world-axis planes at cross-section
-   minima, quantiles and confirmed-zone boundaries.
-4. Search a beam of partition combinations. Leaves containing protected defect
-   cells are discarded in full, rather than claiming that an enclosed void was
-   physically extracted. All physical leaves, including waste, enter verification.
-5. Rank manufacturing-verified plans by retained clean mass, fewer leaves/cuts,
-   clearance and compactness. Keep invalid plans only as geometric_comparison_only
-   summaries. The uncut clean preform competes with split plans and can rank first.
-6. Export exposed voxel faces, preserving concavities. Classify regions by PCA
-   aspect ratio, taper and hull/box compactness. Suggest finish shapes without
-   substituting inscribed final-gem template volume.
+Three measurements must be kept distinct:
 
-Default limits are resolution 56 along the longest extent, beam width 3,
-60 candidate assessments, at most 12 partition leaves, and a 40-second search
-budget with individual cut verification capped at 3 seconds. Preprocessing and
-mesh export are not hard-deadline operations. Diagnostics disclose pitch and
-limits. This is the **highest-ranked recovery plan found within implemented
-search limits**, with no global-optimality claim.
+- **Legacy Faceted Yield**: existing fitted final-gem/template mass relative to
+  rough, exposed unchanged as legacy_faceted_yield_percent when available.
+- **Physical Material Retention**: material retained by the physical stock ledger
+  after actual modeled kerf, confirmed exclusions and explicit physical discard.
+- **Usable Preform Recovery**: retained physical leaf mass that passes the
+  automatic geometric usability and manufacturing checks below.
 
-Uniform-density voxel mass is calibrated to the measured input weight:
+V1 counted eroded interior cores. The previous v2_mass_conserving implementation
+corrected physical conservation but used physical retention for the target.
+v2_usable_preform preserves that ledger and compares the target only to usable
+preform recovery. None of these changes proves a workshop or polished yield.
 
-```text
-mass_per_original_voxel = rough_weight_ct / original_rough_voxel_count
-retained_preform_weight_ct = retained_voxel_count * mass_per_original_voxel
-preform_recovery_percent = retained_preform_weight_ct / rough_weight_ct * 100
-target_weight_ct = rough_weight_ct * target_recovery_percent / 100
-```
+### Physical material and calibration
 
-Thus an 85% target for 100 ct is exactly 85 ct. The returned target label is
-**Expert-defined recovery target** and target_recovery_source is expert_defined.
-If confirmed protected zones intersect the modeled rough, target_applicable is
-false, target_context is defect_constrained, and target_met is null. Otherwise the
-configured threshold is compared directly against unrounded recovery.
+The topology-preserving canonical loader and reconstruction quality gate are
+unchanged. Centering and millimetre scale still use the measured rough weight,
+quartz density 2.65 g/cm3, and absolute canonical mesh volume.
 
-Kerf is estimated using fractional overlap between projected voxel cells and each
-verified blade slab, including kerfs thinner than voxel spacing. Safety-zone,
-inset, kerf and discarded-region diagnostics may overlap spatially: do not add
-all these explanatory quantities as mutually exclusive loss categories.
-remaining_protection_and_discard_loss_ct is the residual after retained mass and
-estimated kerf.
+The filled raw voxel occupancy (SDF > 0), BEFORE any inset, defines a closed
+physical stock solid. Its entire volume is calibrated once:
+
+    V0 = volume of the complete raw voxel solid
+    physical_piece_weight_ct = rough_weight_ct * physical_piece_volume / V0
+    physical_retention_percent = 100 * physical_retained_weight_ct / rough_weight_ct
+    usable_preform_recovery_percent = 100 * usable_preform_weight_ct / rough_weight_ct
+
+    retained_preform_weight_ct = usable_preform_weight_ct
+    preform_recovery_percent = usable_preform_recovery_percent
+
+For a full voxel this equals rough_weight_ct / original_rough_voxel_count.
+No eroded denominator or recovery clamp is used. An uncut, clean stock with no
+discard consequently retains 100% physically. It contributes usable recovery
+only after explicit validation of the entire original physical piece.
+Reconstruction labels cannot create independently credited pieces. Coarse voxel geometry can exceed
+canonical volume; diagnostics report both references and their ratio. Rendered
+mesh volume in mesh units is geometric; known-weight calibration determines
+mass. This does not claim exact boundary geometry or physical usefulness.
+
+An existing disconnected reconstruction component is recorded in
+diagnostics.physical_input_components. Uncut stock is an aggregate of original
+physical occupancy, not a claim that every reconstruction island is a useful
+standalone gem. Erosion-induced fragmentation never creates an actual cut.
+
+### Safety model and candidate search
+
+rough_inset_mm and the voxel boundary margin define virtual placement cores.
+preform_mm protects validation envelopes and confirmed no-cut zones. These
+remain inputs to the existing straight-through cut verifier; its rules, maximum
+depth, blade clearance, and recursive separation checks are unchanged.
+
+Complete physical cells generate PCA/world-axis neck and lobe candidates; virtual
+cores supply conservative manufacturing validation envelopes where available.
+Their omitted shell is NOT removed from physical stock. An uncut stock invokes
+the verifier's existing no-separation case: no interior placement or separation
+has been proposed. For actual cuts all validation envelopes, including waste,
+still pass the unchanged verifier.
+
+The beam and final selector rank verified plans by usable_preform_weight_ct,
+then lower physical kerf, higher physical retention, fewer cuts and clearance.
+All competing plans must pass existing manufacturing and confirmed-defect gates.
+A no-cut plan has exactly ONE physical piece. It counts only if the entire rough
+passes whole-rough usability. Otherwise candidate lobes contribute zero usable
+recovery while the search attempts real manufacturing-valid separation cuts.
+Each proposed leaf has one conservative validation envelope. Disconnected
+safety cores do not themselves force additional cuts; physical connectedness
+is checked on the actual resulting leaf. The default resolution 56, beam 3,
+60 candidates, maximum 12 validation leaves, and 40-second budget are unchanged.
+Each verifier call is capped at 3 seconds. Physical slicing/export may finish
+after the search budget; it is not a hard process deadline. Morphology remains
+advisory and cannot trade away physical mass for a standard finish shape.
+
+### Verified physical partitions and kerf
+
+backend/preform_material.py clips the physical parent's closed convex voxel cells
+with the selected verifier planes. ConvexHull integration measures each boundary
+fragment; full cells remain exact cubes. This handles raw voxel edge/corner
+contacts without surface-topology repair. The helper also supports ordinary
+closed meshes using the project's existing capped Trimesh slicing dependencies.
+Each cut creates a negative child, positive child,
+and independently measured blade slab. Subsequent cuts operate only on their
+actual parent solid. Exported retained meshes are those physical child solids,
+including material outside the virtual cores. PLY exports keep closed cell
+fragments with separate topology (process=False), including coincident internal
+faces of zero volume. Do not merge coincident vertices across touching solids.
+This representation costs more faces than an exterior-only surface but does not
+invent, erode, or duplicate positive-volume material.
+
+    parent_weight = negative_child_weight + positive_child_weight + kerf_weight
+
+This measures thin kerfs using solid geometry, rather than discarding voxel
+centers or estimating a slab over an already-eroded interior. Kerf is counted
+once. Zero kerf uses a zero-volume slab. Invalid/open slices or a failed mass
+invariant reject that candidate, with diagnostic warnings; they do not bypass
+the manufacturing verifier. Per-cut parent/child masses, actual_kerf_removed_ct,
+and errors are in recovery_accounting.partitions.
+
+### Defects, useful residuals and target applicability
+
+Only confirmed_annotations() enters either physical exclusion or validation.
+Provisional/rejected AI geometry has zero recovery effect. Ellipsoid and fracture
+tube regions are conservatively rasterized with a voxel half diagonal. These
+confirmed physical exclusion cells are independent of preform_mm; the extra
+preform validation buffer is virtual. Overlapping zones are unioned once.
+Blade planes must avoid confirmed cells; a second physical check catches plane
+serialization discrepancies.
+
+A physical terminal piece containing confirmed excluded cells is conservatively
+unusable as a whole. The confirmed cells go in confirmed_defect_loss_ct; its
+remaining healthy mass goes in explicit_discarded_weight_ct, with
+discard_reason="confirmed_defect_containing_piece". The model never assumes an
+enclosed defect cavity can be extracted without valid access cuts.
+
+All clean physical residuals initially remain retained stock, including irregular
+material and material whose virtual core is tiny. They contribute to usable
+recovery only if the additional geometric screen passes. The largest clean region is exempt from
+min_secondary_carat. Other physical leaves below that threshold are recorded in
+discarded_regions with physical weight and
+discard_reason="below_minimum_secondary_mass". There is no four-voxel physical
+mass floor; small sample rules still limit candidate generation, not stock mass.
+Every retained physical region is exported, including nonusable stock. It reports
+physical_weight_ct, usable_preform_weight_ct, usable, usability_status,
+usability_reasons, rejection_reasons and usability_checks.
+retained_weight_ct is the usable mass alias, which is zero for a nonusable leaf;
+volume_mesh_units still describes its full physical geometry.
+usefulness_status is "geometric_screen_only_not_workshop_validated".
+
+The expert-defined default 85% target applies exactly when the count of CONFIRMED
+fractures and inclusions is zero. A confirmed fracture/inclusion outside the mesh
+still disables that target by the clarified count-based rule. Other confirmed
+types can constrain usable stock but do not themselves disable the target.
+
+    no confirmed fracture/inclusion:
+      target_applicable=true, target_context="defect_free"
+      target_met=(usable_preform_recovery_percent >= target_recovery_percent)
+    otherwise:
+      target_applicable=false, target_context="defect_constrained", target_met=null
+
+confirmed_defect_excluded_ct and confirmed_defect_excluded_percent expose the
+confirmed physical exclusion separately. usable_after_defects_ct and
+recovery_of_usable_percent provide the defect-only upper bound and relative
+recovery (null when no healthy material exists). This does not prove the stone
+has no unobserved internal defects.
+
+### Geometric usable-preform validation
+
+The user approved automatic geometric checks with explicit workshop limits.
+No gemstone-industry thickness threshold is invented or tuned to reach 85%.
+backend/preform_usability.py evaluates the FULL physical leaf, never its eroded
+safety core. A region qualifies only when all these checks pass:
+
+1. Positive finite physical volume and mass.
+2. No confirmed excluded cells in the physical piece.
+3. The existing min_secondary_carat setting is met for secondaries; the largest
+   clean primary remains exempt from that mass threshold.
+4. Exactly one connected physical component. Connections require positive-area
+   shared voxel faces after clipping, or logged canonical-supported interior links.
+   Edge/corner proximity alone is not a connection; canonical-disconnected sources
+   never merge just because coarse voxel cells touch.
+5. Its shortest PCA-aligned physical bounding width spans at least two voxel
+   widths. This is an explicitly labeled numerical-resolution screen, not a
+   validated minimum handling thickness. Actual clipped boundary vertices are
+   included. This test is independent of rough_inset_mm and preform_mm.
+6. That shortest physical bounding width is within max_cut_depth_mm, providing a
+   conservative geometric processing-width screen under the existing saw setting.
+7. No strong cross-sectional neck requiring further partition evaluation remains.
+8. The existing separation verifier passes; actual cut plans require complete
+   status and exact_sequence_verified. Required cuts must be selected_verified.
+
+The width screen does NOT certify weakest-neck strength, fixture stability,
+fracture propagation, or optics. Workshop handling is always marked unvalidated.
+Raw-rough provenance alone is neither proof of usability nor a rejection reason:
+a connected, resolved and processable clean rough can qualify as an irregular
+preform. No new final-gem template fitting or arbitrary aesthetic score is used.
+
+whole_rough_usable and whole_rough_validation report the same checks on the entire
+uncut stock before search, with reasons and dimensions. A disconnected whole
+rough cannot count as one usable preform. Each original physical component is
+also assessed diagnostically, including components with zero safety-core cells.
+candidate_geometry_eligible describes a possibility; it contributes no usable
+mass until it is part of a qualifying, selected physical leaf.
+physical_input_components records selected_piece_contributions and
+selected_usable_weight_ct, including QZ-05's pointed component.
+
+Eligible irregular geometry reports irregular_preform and contributes its entire
+physical leaf mass. Other eligible morphologies report usable_preform. Pointed
+pieces can suggest pear, marquise and kite_diamond_preform. Recommendations never
+change eligibility or promise a finished gemstone.
+
+Nonusable classifications are requires_separation, requires_further_separation, too_small,
+manufacturing_invalid, defect_constrained and numerical_debris. In particular,
+"numerical_debris" can mean thickness unresolved at the current voxel resolution;
+it is not proof that the actual material is worthless. Reasons remain explicit.
+Usability failure does not itself remove material from the physical ledger.
+diagnostics.usable_plan_count counts eligible plans, and usability_rejections
+counts rejected leaf reasons across assessed plans, including the uncut control.
+Discarded physical regions also retain morphology, advisory shapes and usability
+status/reasons, while contributing zero usable mass.
+
+### Accounting and API additions
+
+Existing mode, recovery_basis, target, mass, regions, cuts, manufacturing,
+search-state and message fields remain available. Top-level cut serialization
+and mesh URLs keep their existing contract. Additive fields are:
+
+    recovery_model_version: "v2_usable_preform"
+    physical_retained_weight_ct
+    physical_retention_percent
+    usable_preform_weight_ct
+    usable_preform_recovery_percent
+    whole_rough_usable
+    whole_rough_validation
+    usable_region_count
+    usable_preform_accounting:
+      physical_retained_weight_ct
+      usable_preform_weight_ct
+      nonusable_physical_weight_ct
+      usable_preform_recovery_percent
+      whole_rough_usable
+      usable_region_count
+      usable_regions
+      nonusable_regions
+      classification_balance_error_ct
+      validation_basis
+      workshop_validated: false
+    recovery_accounting:
+      model_version: "v2_mass_conserving"
+      original_rough_weight_ct
+      confirmed_defect_loss_ct
+      kerf_loss_ct
+      explicit_discarded_weight_ct
+      numerical_loss_ct
+      virtual_safety_excluded_ct
+      retained_physical_weight_ct
+      unresolved_weight_ct
+      mass_balance_error_ct
+      mass_balance_error_percent
+      mass_balance_tolerance_ct
+      mass_balance_valid
+      partitions
+      warnings
+
+The exclusive ledger is:
+
+    original = retained + confirmed defects + kerf + explicit discard
+               + unresolved + numerical loss + mass_balance_error
+
+virtual_safety_excluded_ct is diagnostic only and is NOT a ledger subtraction.
+numerical_loss_ct is zero unless an actual numerical removal is modeled;
+roundoff is exposed as mass_balance_error, not disguised as waste.
+Tolerance is max(1e-8 ct, original_weight*1e-8). The reusable mass_balance check
+reports violations; violating candidate partitions are rejected and the
+optimizer records a warning.
+
+The second, independent classification ledger is:
+
+    physical_retained = usable_preform + nonusable_physical + classification_error
+
+Nonusable retained material is NOT subtracted again as physical waste.
+usable_regions lists qualifying region IDs. nonusable_regions records IDs,
+physical mass, status and rejection reasons. The exclusive physical ledger's
+defect/kerf/discard/unresolved categories remain separate.
+
+When the uncut rough fails usability and no useful partition is verified, the
+healthy uncut physical stock can remain 100% physically retained while usable
+recovery is zero. manufacturing_status="no_verified_plan" distinguishes this
+fallback from a selected usable no-cut plan. If no clean physical plan can be
+established, the existing unresolved_weight_ct behavior is preserved.
+The expert target uses only usable recovery, never mere physical retention.
+
+V1 explanatory diagnostics could overlap. In V2 rough_inset_loss_ct is zero;
+the historical boundary exclusion is now virtual_safety_excluded_ct.
+estimated_kerf_loss_ct is the measured modeled blade-slab mass. Other retained
+diagnostic aliases describe physical discard/unresolved mass and must not be
+added again to recovery_accounting.
 
 ## Scientific and operational limits
 
-- Preform recovery is **not polished final gemstone yield**.
-- The configurable 85% target is consultation evidence, not a validated universal
-  industry constant. No attempt is made to force a run to meet it.
-- Voxel pitch, uniform density, conservative protection and discarding dirty
-  leaves can substantially reduce estimated recovery. Especially at low test
-  resolutions, numerical losses are large; inspect diagnostics.
-- Plane directions and beam width are limited. Enclosed/complex defects may
-  produce low recovery or no_verified_plan; curved cutting and local grinding
-  are not modeled.
-- The cut verifier supplies operator guidance. It does not certify fixturing,
-  fracture propagation or physical workshop performance.
-- Shape suggestions have no optical validation; shape_compatibility_score is null.
-  kite_diamond_preform is advisory, not a standardized diamond facet design.
-- The legacy optimizer retains its previous detector-policy behavior for exact
-  comparison compatibility; confirmed_only governs this new workflow.
-- JSON results provide the separate report. Existing thesis/PDF reports are
-  unchanged. This work does not establish new thesis claims.
+- Preform recovery is not polished gemstone yield; preserving original stock
+  does not validate its usefulness, optics, or eventual finish yield.
+- Automatic usable-preform validation is a geometric screen. The two-voxel
+  bounding-width rule is resolution dependent; workshop handling, weakest-neck
+  strength and final polished-gem suitability are unvalidated.
+- The 85% threshold is expert consultation evidence, not a universal standard.
+  The implementation never adjusts recovery to reach it.
+- Raw voxel boundaries and conservative confirmed cells are approximations.
+  Physical scale still comes from canonical mesh calibration; the reported
+  voxel/canonical volume ratio exposes geometric discretization.
+- Reconstruction components are geometry evidence inside one physical stock.
+  They may reflect photogrammetry artifacts or resolution limits. They are never
+  independent physical pieces merely because their mesh surfaces are disconnected.
+- Enclosed defects may require discarding a larger healthy piece; curved cuts,
+  fracture propagation, grinding, and future polishing losses are not modeled.
+- Safety margins are reservations, not physical grinding estimates. Future
+  processing loss needs a separate explicit operation.
+- Bounded search is not globally optimal; a no-plan result leaves unresolved
+  material. Failed slicing cannot become a selected recommendation.
+- The unchanged cut verifier supplies operator guidance, not machine or
+  workshop certification. Fixture stability still needs physical validation.
+- Shapes are advisory; kite_diamond_preform is not a standardized facet design.
+- Legacy faceted behavior, saved V1 results, PDF reports and frozen thesis
+  evidence are unchanged. V2 numbers must not overwrite prior research claims.
 
 ## Verification
 
@@ -583,12 +819,14 @@ backend/requirements-test.txt.
 ```powershell
 conda activate quartz
 python -m pip install -r backend/requirements-test.txt
-python -B -m unittest backend.tests.test_preform_blockers backend.tests.test_preform_contract backend.tests.test_preform_recovery backend.tests.test_cut_sequence backend.tests.test_defect_policy backend.tests.test_job_progress_extended backend.tests.test_yield_calculator_manufacturing backend.tests.test_optimizer_synthetic -v
+python -B -m pytest backend/tests -q
 ```
 
 Tests cover annotation provenance/persistence and confirmation, target/formula
 math, provisional exclusion, confirmed constraints, four morphology classes,
-voxel mesh volume, verified cuts, thin-kerf loss, manufacturing rejection, API
+voxel mesh volume, whole-rough eligibility, disconnected/thin material, physical
+versus usable recovery, irregular/pointed preforms, usable-mass plan ranking,
+verified cuts, thin-kerf loss, manufacturing rejection, API
 errors and lifecycle, immutable prior results, restart recovery, and legacy
 optimizer/manufacturing behavior.
 
@@ -604,7 +842,7 @@ python -B backend/tests/smoke_preform_real.py
 This copies QZ-05/QZ-01 canonical inputs and detector metadata into a fresh ignored
 tmp/preform_real_smoke_* directory, runs a hidden local HTTP server, calibrates
 defect review, POSTs default recovery settings, immediately polls status, fetches
-results and a region PLY, and checks API responses for private paths. It separately
+results and every retained region PLY, and checks API responses for private paths. It separately
 runs the existing reconstruction quality gate and compares process=True/False
 watertightness. Source artifact hashes must remain unchanged. A local smoke_summary.json
 and server.log are retained in the scratch directory. The expert recovery target
@@ -614,3 +852,346 @@ preform; all emitted cuts must be selected_verified.
 Real QZ-01 also exercised a zero-area centroid failure in Trimesh's point-cloud
 hull construction. The existing voxel-corner envelope fallback handles that
 arithmetic exception; no manufacturing or reconstruction checks are bypassed.
+
+
+## Final V2 canonical topology and physical-piece authority
+
+Watertightness is not proof of one connected solid. Unmodified QZ-05 and QZ-01
+canonical meshes contain 14 and 17 vertex-connected closed sources respectively,
+while coarse raw occupancy has 5 and 12 face-connected components. Coarse cells
+can both miss a thin connection and merge distinct nearby source surfaces.
+These are reconstruction topology counts, not physical-piece counts. The job
+still starts with exactly one physical rough stone.
+
+preform_topology.py computes raw 6/26 connectivity and canonical vertex-edge
+components. Every existing cell is attributed to its nearest canonical surface
+vertex. This is approximate raster ownership, not exact per-source volumetric
+integration; the complete raw occupancy and its original calibrated mass remain
+unchanged. Source attribution can increase the component count. Very small
+canonical sources may have no separate occupied cell.
+
+Within one canonical source, candidate source edges spanning fragmented occupied
+cells are checked in a bounded local search: at most 256 edge attempts, edge length
+at most two pitches, and 17 inward samples at three small inset scales. Every
+sample must be inside the canonical mesh and outside confirmed safety corridors.
+A successful check adds a connectivity link only: zero voxels and zero mass.
+No morphology closing or distance-only merge occurs. This is a sampled geometric
+repair, not an exact continuum proof. Unsupported gaps remain unresolved.
+Clipping preserves a link only if its full sampled path survives on that side;
+a removed kerf cannot retain a link through the cut.
+
+diagnostics.topology records raw, 26-neighbour, source-attributed and consolidated
+counts, canonical source count, per-raw-component source classification, repair
+paths, distance, attempted edges and zero added mass. Repair component IDs refer
+to the source-attributed components before repair. gap_mm is the endpoint
+cell-centre separation, not a measured air-gap thickness.
+
+### One stock, physical children only through selected cuts
+
+The authoritative graph starts at rough_piece_1 (P0), the one original stone.
+Only a selected, manufacturing-verified binary cut creates two physical children
+and a measured kerf slab. Reconstruction component labels NEVER subdivide a leaf.
+Each resulting child retains all of its geometry, including reconstruction
+islands and residuals, until a later verified cut partitions that physical child.
+
+The four concepts are distinct:
+
+| Entity | Meaning | Independent usable credit |
+|---|---|---|
+| reconstruction_component | Mesh/voxel topology evidence | Never by label alone |
+| candidate_region | Possible future lobe/preform; morphology and proposed planes | Only via overlap with an already validated physical piece |
+| physical_piece | Original stock or an actual selected cut-tree leaf | After whole-piece usability validation |
+| usable_preform | Physical piece passing geometric and manufacturing checks | Full physical-piece mass |
+
+Zero cuts means one physical piece. If whole_rough_usable is false, zero cuts
+means zero usable recovery. Individually promising candidate lobes cannot bypass
+this rule. A good uncut whole rough can still contribute its full mass.
+The mass ledger remains independent: 100% physical retention can coexist with
+0% usable recovery. A tiny reconstruction island is not a physical secondary
+discard until a cut actually creates such a secondary piece.
+
+Existing region fields still describe physical leaves. Additive diagnostics:
+physical_piece_count (all leaves, including discard), candidate_region_count
+(raw voxel component candidates), reconstruction_component_count (canonical mesh
+components), requires_separation_weight_ct (retained physical leaves classified
+requires_separation or requires_further_separation), candidate_regions and
+physical_piece_graph. The graph exposes root, cut partitions and leaf IDs.
+physical_piece_count equals selected cuts + 1. Each physical child has its parent
+and creation step. Per-region separation_required and credited_to_usable_recovery
+refer to that physical leaf; candidate credited mass is overlap attribution only,
+never extra mass. Overlapping candidates must not be summed into another ledger.
+
+The old natural_component_partitions field remains an empty list for compatibility;
+it no longer authorizes any subdivision. The legacy physical_input_components
+diagnostic is retained but means reconstruction evidence. Source ownership and
+consolidation affect geometric checks and candidate planning only. Whole-piece
+checks remain conservative when reconstructed geometry is unresolved.
+
+## Final V2 neck search and residuals
+
+Physical PCA/world-axis histograms use bins approximately one voxel wide or larger
+to avoid false minima between regular cell centres. Smoothed cross-sectional
+minima report normal, offset, approximate width and adjoining lobe masses.
+A valley below 0.35 of both adjoining peak sections, with meaningful material on
+both sides, is a geometric search heuristic, not an expert handling threshold.
+Strong necks require further separation evaluation. Quantile proposals also
+consider tapered tips, appendages and bulky lobes; finish-template fits are not
+required. Strong neck normals receive a bounded plus/minus five-degree variation.
+
+Canonical plane signatures suppress equivalent planes. Cheap screening rejects
+empty/undersized sides and confirmed blade-corridor intersections. Candidate
+ranking prioritizes unresolved usable mass, neck strength and lower estimated
+kerf. Only the best six initial and four subsequent proposals per state reach the
+unchanged manufacturing verifier; beam width remains three. Both physical children
+including all their residual geometry are evaluated; nonusable retained pieces inform
+the next recursive level. Virtual envelope omissions never remove physical mass.
+
+diagnostics.search_trace includes generated/duplicate/geometrically-valid/
+manufacturing-validated candidates, explored/pruned states, maximum attempted
+depth, termination reason, candidate kinds and best usable-weight progression.
+Generated planes are cheap proposals, not all expensive verifier calls. Depth
+counts a separation level considered, not the selected cut count. The 60-candidate,
+40-second search is bounded and does not prove global optimality; geometry
+processing and export can complete beyond that search budget.
+
+The physical ledger still includes every cut child and actual kerf, confirmed
+exclusions and explicit below-minimum discard. A useful irregular or pointed
+residual contributes its full physical mass. Workshop handling and optics remain
+unvalidated. The configurable expert 85% target applies only to usable recovery
+with zero confirmed fractures/inclusions; provisional/rejected candidates have
+zero effect.
+
+## Effective legacy comparison and final compatibility
+
+effective_result.py contains the application's existing read-only resolution
+policy, shared by main.get_effective_result and the preform API. A manifest
+promoting an existing extended_search/result_v2/analysis_report.json selects
+that report; otherwise the root report remains the fallback. No yield is hardcoded.
+The input manifest records legacy_comparison_source.result_id and
+report_sha256; raw filesystem paths are not exposed. Saved reports are not
+rewritten. Scratch smoke copies the promotion manifest and selected report,
+then verifies its comparison against the original effective result.
+
+Current web/frontend/src/utils/preformRecovery.js, the preform panels and
+ResultDashboard consume the preserved canonical result fields and backend-relative
+mesh URLs. This final task changes no frontend files and introduces no required
+field rename. Existing aliases continue to mean USABLE recovery; topology,
+physical-piece and search diagnostics are additive. Saved V1 results retain their
+original version and values. The historical reconciliation table above is not
+a list of newly required frontend changes.
+
+Verification adds supported thin-gap repair, genuine disconnection, confirmed
+fracture/inclusion overrides and provisional neutrality, unchanged mass/occupancy,
+regular-box anti-aliasing, strong necks, recursive search, duplicate planes,
+cut-only physical-piece authority, residuals and effective legacy API tests. Real HTTP
+smoke validates both quality gates, lifecycle, result/mesh downloads, exact mass
+ledgers and unchanged original hashes/inventories.
+
+
+## Physical-piece correction verification
+
+Regression coverage enforces one stock despite many reconstruction labels,
+no candidate credit or tiny-island discard before separation, whole-stock credit
+when valid, exactly two children plus kerf after a cut, parent/creation-step
+provenance, pointed-lobe credit only through validated physical leaves, and
+rejection of unverified or mislabeled cut sequences. Real scratch validation
+asserts the graph invariant and zero-cut usability rule for both QZ-05/QZ-01.
+Reconstruction-lobe proposals complement the preserved neck/PCA/beam search and
+always pass the existing manufacturing verifier before physical partitioning.
+The earlier approximately 99% results based on natural source partitioning are
+superseded and must not be reported as physically valid usable recovery.
+
+
+## Human-in-the-loop Expert Review (schema 1)
+
+Expert review is an additive evidence layer over a completed physical-piece V2
+result. It classifies existing physical leaves; it does not change geometry,
+selected cuts, defects, automatic validation, physical retention or the optimizer
+result. Unresolved retained material is not automatically waste.
+
+Three measurements remain separate:
+1. Physical material retention: immutable optimizer physical ledger.
+2. Auto-validated usable preform recovery: immutable automatic result.
+3. Expert-reviewed / review-adjusted usable preform recovery: auto usable mass plus
+   unresolved retained physical leaves explicitly accepted by the reviewer.
+
+This is never polished yield, and review does not establish a universal workshop
+standard. Reviewer experience and name/code are voluntarily entered provenance,
+not authenticated expert credentials. No automatic rerun follows a decision.
+
+### Physical authority and supported runs
+
+Review supports completed recovery_model_version=v2_usable_preform runs using
+stock_partition_basis=one_original_physical_stock_and_verified_cuts_only.
+The API replays selected verified cuts from the single root, checks unique child
+lineage, matches final graph leaves and physical region metadata, and reconciles
+retained/auto-usable masses to the result. Only final physical leaf IDs are accepted.
+Use the piece_id returned by GET (for example rough_piece_4); never use a region
+ID such as R1, a cut ID, reconstruction component or candidate-lobe ID.
+
+All physical leaves appear in pieces. Retained non-auto-usable leaves have
+review_required=true and decision=pending initially. Auto-usable leaves and
+explicitly physically discarded leaves have review_required=false; this first
+version rejects PATCH decisions on them (409). No expert override of auto usable
+mass or resurrection of discarded physical material is implemented.
+
+Original uncut stock is one physical leaf and may itself be reviewed when it is
+retained and unresolved. Expert acceptance of that entire leaf does not create
+additional physical pieces.
+
+### Exact API endpoints
+
+- GET /jobs/{job_id}/preform-recovery/{run_id}/expert-review
+- PATCH /jobs/{job_id}/preform-recovery/{run_id}/expert-review
+- PATCH /jobs/{job_id}/preform-recovery/{run_id}/expert-review/pieces/{piece_id}
+
+GET initializes the separate evidence file if absent. Both PATCH operations return
+the same full review response as GET; existing optimizer endpoints and metrics
+are unchanged. No frontend modification or additional endpoint is required.
+
+Session PATCH example:
+
+```json
+{
+  "reviewer": {
+    "name": "Voluntary reviewer name or alias",
+    "code": "EXP-01",
+    "experience_years": 15
+  }
+}
+```
+
+Defaults are name="", code=null, experience_years=null. Nested metadata PATCH is
+partial. Experience must be finite and nonnegative; no credential is required.
+Name/code limits are 200/100 characters. Unknown fields are rejected.
+
+Piece PATCH example:
+
+```json
+{
+  "decision": "needs_further_separation",
+  "reason_code": "requires_additional_cut",
+  "notes": "Expert recommends another separation cut."
+}
+```
+
+Decisions:
+- pending: no completed decision; no additional usable credit.
+- usable_preform: reviewer accepts this existing retained physical leaf; adds its
+  full physical weight to expert-confirmed additional usable mass.
+- needs_further_separation: completed expert decision; retained and non-waste,
+  but no usable credit yet. No optimizer is started.
+- waste_unusable: explicit expert classification for this objective; no usable
+  credit. The immutable physical-retention metric still does not change.
+
+Optional reason_code is null or shape_usable, geometry_usable,
+requires_additional_cut, too_small, defect_concern, handling_concern,
+commercially_impractical or other. These are expert-provided labels, not automatic
+scientific findings. Notes are text, maximum 10,000 characters. Omitted reason/notes
+retain prior values. To clear them when resetting, send decision=pending,
+reason_code=null and notes="". A pending reset clears reviewed_at.
+
+### Response and exact calculations
+
+Top-level fields: schema_version, job_id, run_id, reviewer, target_applicable,
+target_recovery_percent, pieces, summary. Additive audit fields: result_sha256,
+current_result_sha256, created_at, updated_at, stale, review_status and stale_reason.
+
+Each piece includes piece_id, parent_piece_id, created_by_cut_id, weight_ct,
+auto_usable, auto_usability_status, morphology, suggested_finish_shapes, mesh_file,
+review_required, decision, reason_code, notes and reviewed_at. physically_retained
+is an additive boolean. Provenance comes from selected cuts, not candidate labels.
+The root has null parent/cut. Browser-safe mesh_file is regenerated from the
+existing local region export as /files/{job}/preform_recovery/{run}/R1.ply.
+Missing/unsafe assets return null; metadata review remains available. Meshes are
+reused rather than duplicated by the review API. Server filesystem paths are
+never copied from stored asset fields into the response.
+
+summary preserves rough_weight_ct, physical_retained_weight_ct,
+physical_retention_percent, auto_validated_usable_weight_ct and
+auto_validated_usable_recovery_percent from the compatible optimizer result.
+
+    additional = sum(review-required physical leaf weight where decision == usable_preform)
+    review_adjusted_usable_weight_ct = auto_validated_usable_weight_ct + additional
+    review_adjusted_usable_recovery_percent = 100 * adjusted_weight / rough_weight_ct
+
+expert_confirmed_additional_usable_weight_ct is additional. The remaining
+review-required weights are bucketed exclusively into pending_review_weight_ct,
+needs_further_separation_weight_ct and expert_unusable_weight_ct. Auto-usable
+pieces are counted once and never require reconfirmation. The sum of auto usable
+and the four review-required buckets equals physical retention.
+
+review_required_count counts unresolved retained leaves; reviewed_count counts
+those with decision other than pending. review_complete means every required leaf
+has a non-pending decision, including needs_further_separation.
+
+target_status follows this exact order:
+1. not_applicable when the result target is defect-constrained.
+2. met when adjusted recovery meets the configured target (even with pending leaves).
+3. pending_review when pending required mass remains.
+4. not_met otherwise.
+
+Thus a fully reviewed current plan can remain not_met because some pieces need
+further separation. The default 85% is an expert-defined practical target for zero
+confirmed fractures/inclusions, not a guaranteed outcome. The existing
+confirmed-only defect policy and target_applicable value are never changed.
+
+### Persistence, staleness and errors
+
+Only jobs/{job_id}/preform_recovery/{run_id}/expert_review.json is written:
+
+```json
+{
+  "schema_version": 1,
+  "job_id": "JOB_ID",
+  "run_id": "RUN_ID",
+  "result_sha256": "SHA256_OF_COMPLETED_RESULT_BYTES",
+  "reviewer": {"name": "", "code": null, "experience_years": null},
+  "piece_reviews": {
+    "rough_piece_4": {
+      "decision": "needs_further_separation",
+      "reason_code": "requires_additional_cut",
+      "notes": "Expert observation",
+      "reviewed_at": "UTC_ISO_TIMESTAMP"
+    }
+  },
+  "created_at": "UTC_ISO_TIMESTAMP",
+  "updated_at": "UTC_ISO_TIMESTAMP"
+}
+```
+
+The existing cross-process job lock serializes updates; existing atomic JSON
+replacement persists evidence. No result.json, analysis_report.json, saved V1/V2
+result, region mesh or defect file is rewritten. Repeated GET preserves timestamps.
+
+A changed result hash makes GET stale=true with review_status=stale. Stored
+decisions remain untouched and are not applied: response pieces use pending
+defaults and summary uses the current immutable auto result. PATCH returns 409.
+An incompatible/corrupt changed graph also returns 409 (422 for an unsupported
+result model). There is no silent rebinding; use a new compatible completed run.
+This first version stores latest decisions and timestamps, not a historical
+revision trail or authenticated electronic signature.
+
+404: missing job/run or unknown/non-leaf piece ID.
+409: incomplete run, stale/corrupt result/review, unsupported override, or busy IO.
+422: invalid payload/decision/reason/metadata or unsupported V1/physical model.
+Errors use generic public messages and do not expose server paths.
+
+### Verification
+
+backend/tests/test_preform_expert_review.py covers initialization, all decisions,
+reset, formula/target ordering, metadata persistence/restart, concurrency, retained
+leaf restrictions, discarded/auto override rejection, staleness, safe/missing
+meshes, invalid data, uncut physical stock and unchanged optimizer/legacy bytes.
+The full existing backend suite still covers V2 mass/defect/legacy behavior.
+
+Run the opt-in real HTTP smoke in quartz:
+
+```powershell
+python -B backend/tests/smoke_preform_expert_review.py
+```
+
+It copies the completed real QZ-05/QZ-01 scratch V2 runs, verifies all review
+calculations and mesh downloads, and hashes optimizer results and original inputs.
+All injected decisions are explicitly SIMULATED TEST ONLY and finally reset to
+pending; they are not real expert evidence or a claim that 85% was achieved.
