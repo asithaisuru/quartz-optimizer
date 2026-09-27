@@ -1,12 +1,13 @@
 import React, { Suspense, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Canvas, useFrame, useLoader } from '@react-three/fiber';
-import { Bounds, ContactShadows, Environment, Line, TrackballControls } from '@react-three/drei';
+import { Bounds, ContactShadows, Line, TrackballControls } from '@react-three/drei';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader';
 import {
   Box, Eye, EyeOff, Grid, Pause, Play, RotateCcw,
-  ScanSearch, SkipBack, SkipForward, Sun,
+  ScanSearch, SkipBack, SkipForward, Sun, X,
 } from 'lucide-react';
 import * as THREE from 'three';
+import MetricHelp from './MetricHelp';
 
 const BACKEND_TO_VIEWER = [-Math.PI / 2, 0, 0];
 
@@ -53,6 +54,111 @@ function CutGem({ url, showWireframe }) {
         </mesh>
       )}
     </group>
+  );
+}
+
+// Individual per-gem PLY files are exported directly from the same
+// placement used to build the combined cut mesh, so — unlike ProtectedGem
+// below — they already sit in the rough stone's coordinate frame and need
+// no re-centering to line up with it.
+function InspectableGem({ gem, isSelected, isMuted, showWireframe, onSelect }) {
+  const geometry = useLoader(PLYLoader, gem.url);
+  useLayoutEffect(() => { geometry.computeVertexNormals(); }, [geometry]);
+  const color = isSelected ? '#22d3ee' : isMuted ? '#475569' : '#ff175f';
+  return (
+    <group>
+      <mesh
+        geometry={geometry}
+        onClick={(event) => { event.stopPropagation(); onSelect(gem.index); }}
+        onPointerOver={(event) => { event.stopPropagation(); document.body.style.cursor = 'pointer'; }}
+        onPointerOut={() => { document.body.style.cursor = 'auto'; }}
+      >
+        <meshStandardMaterial
+          color={color} roughness={0.12} metalness={0.68}
+          transparent opacity={isMuted ? 0.16 : 1} depthWrite={!isMuted}
+        />
+      </mesh>
+      {showWireframe && (
+        <mesh geometry={geometry}>
+          <meshBasicMaterial
+            color="#ffe45e" wireframe transparent
+            opacity={isMuted ? 0.12 : 0.82}
+          />
+        </mesh>
+      )}
+      {isSelected && (
+        <mesh geometry={geometry} scale={1.012}>
+          <meshBasicMaterial color="#67e8f9" wireframe transparent opacity={0.9} depthWrite={false} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+function GemStat({ label, help, value, mono }) {
+  return (
+    <div className="bg-slate-900 rounded px-2 py-1.5 min-w-0">
+      <div className="flex items-center text-slate-500">
+        <span className="truncate">{label}</span>
+        {help}
+      </div>
+      <div
+        className={`text-white break-words leading-snug ${mono ? 'font-mono text-[9px]' : ''}`}
+        title={typeof value === 'string' || typeof value === 'number' ? String(value) : undefined}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function SelectedGemPanel({ gem, mmPerMesh, onClear }) {
+  if (!gem) return null;
+  const dims = Array.isArray(gem.dimensions_mm) ? `${gem.dimensions_mm.join(' × ')} mm` : '—';
+  const center = Array.isArray(gem.center_mm) ? `${gem.center_mm.join(', ')} mm` : '—';
+  const clearanceMesh = gem.surface_clearance_mesh_units;
+  const clearanceMm = typeof clearanceMesh === 'number' && mmPerMesh > 0
+    ? (clearanceMesh * mmPerMesh).toFixed(3)
+    : null;
+  const clearanceValue = clearanceMm !== null
+    ? `${clearanceMm} mm`
+    : (typeof clearanceMesh === 'number' ? `${clearanceMesh} mesh u.` : '—');
+
+  return (
+    <div className="absolute left-4 bottom-4 z-20 w-80 max-w-[88vw] border border-cyan-500/40 bg-slate-950/95 p-3 rounded-lg shadow-xl">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-semibold text-cyan-300 break-words pr-2">
+          Gem #{gem.index}{gem.shape ? ` · ${gem.shape}` : ''}
+        </div>
+        <button
+          onClick={onClear}
+          title="Clear selection"
+          className="shrink-0 text-slate-500 hover:text-white"
+        ><X className="w-3.5 h-3.5" /></button>
+      </div>
+      <div className="grid grid-cols-2 gap-1.5 text-[10px] leading-snug">
+        <GemStat label="Weight" value={gem.weight_ct != null ? `${gem.weight_ct} ct` : '—'} />
+        <GemStat label="Dimensions" value={dims} />
+        <GemStat
+          label="Rough yield"
+          help={<MetricHelp metricKey="roughYield" align="right" />}
+          value={gem.yield_percent != null ? `${gem.yield_percent}%` : '—'}
+        />
+        <GemStat
+          label="Plan share"
+          help={<MetricHelp metricKey="planShare" align="right" />}
+          value={gem.plan_share_percent != null ? `${gem.plan_share_percent}%` : '—'}
+        />
+        <GemStat label="Scale" value={gem.scale != null ? Number(gem.scale).toFixed(4) : '—'} />
+        <GemStat label="Center" value={center} />
+        <GemStat
+          label="Surface clearance"
+          help={<MetricHelp metricKey="surfaceClearance" align="right" />}
+          value={clearanceValue}
+        />
+        <GemStat label="Reference" value={gem.file || '—'} mono />
+      </div>
+    </div>
   );
 }
 
@@ -212,8 +318,10 @@ function AutoSpinner({ isSpinning }) {
 }
 
 export default function ModelViewer({
-  modelUrl, cutUrl, defectsUrl, gemUrls = [], manufacturingPlan = {},
-  remainingSpace = null, activeStrategyName = null, activeGemCount = null,
+  modelUrl, cutUrl, defectsUrl, gemUrls = [], gemDetails = [], manufacturingPlan = {},
+  remainingSpace = null, remainingSpaceDiagnostic = null,
+  activeStrategyName = null, activeGemCount = null,
+  selectedGemIndex = null, onSelectGem = () => {},
 }) {
   const sequence = Array.isArray(manufacturingPlan?.sequence)
     ? manufacturingPlan.sequence : [];
@@ -234,6 +342,15 @@ export default function ModelViewer({
   const preformMargin = Number(manufacturingPlan?.settings?.preform_margin_mm) || 0;
   const marginMesh = mmPerMesh > 0 ? preformMargin / mmPerMesh : 0;
   const remainingComponent = remainingSpace?.components?.[0] || null;
+
+  // Individual gem PLYs exist for this strategy — render each gem
+  // separately (selectable) instead of the single combined cut mesh.
+  // Falls back to the combined CutGem below when none are available.
+  const inspectableGems = (Array.isArray(gemDetails) ? gemDetails : [])
+    .filter((gem) => gem?.url);
+  const hasIndividualGems = inspectableGems.length > 0;
+  const selectedGem = (Array.isArray(gemDetails) ? gemDetails : [])
+    .find((gem) => gem?.index === selectedGemIndex) || null;
 
   useEffect(() => {
     setStepIndex(0);
@@ -285,7 +402,9 @@ export default function ModelViewer({
         {cutUrl && !sequenceMode && (
           <button
             onClick={() => setShowCut(!showCut)}
-            title={showCut ? 'Hide cut plan' : 'Show cut plan'}
+            title={showCut
+              ? (hasIndividualGems ? 'Hide gems' : 'Hide cut plan')
+              : (hasIndividualGems ? 'Show gems' : 'Show cut plan')}
             className="w-11 h-11 grid place-items-center bg-slate-800/90 border border-slate-600 rounded-lg text-white hover:bg-cyan-600"
           ><Box className="w-4 h-4" /></button>
         )}
@@ -304,7 +423,7 @@ export default function ModelViewer({
         {remainingComponent && !sequenceMode && (
           <button
             onClick={() => setShowRemainingSpace((value) => !value)}
-            title={showRemainingSpace ? 'Hide remaining-space diagnostic' : 'Show remaining-space diagnostic'}
+            title={showRemainingSpace ? 'Hide remaining geometric space (diagnostic)' : 'Show remaining geometric space (diagnostic)'}
             className={`w-11 h-11 grid place-items-center border rounded-lg ${showRemainingSpace ? 'bg-cyan-600 border-cyan-400 text-white' : 'bg-slate-800/90 border-slate-600 text-slate-300'}`}
           ><ScanSearch className="w-4 h-4" /></button>
         )}
@@ -312,14 +431,37 @@ export default function ModelViewer({
 
       {showRemainingSpace && remainingComponent && !sequenceMode && (
         <div className="absolute top-16 left-4 z-20 max-w-xs border border-cyan-500/40 bg-slate-950/90 p-3 rounded-lg">
-          <div className="text-xs font-semibold text-cyan-300">Largest remaining-space envelope</div>
-          <div className="mt-1 text-[10px] leading-4 text-slate-400">
-            {remainingComponent.rejection_reason || 'No verified saleable placement remained.'}
+          <div className="text-xs font-semibold text-cyan-300">
+            {remainingSpaceDiagnostic?.heading || 'Remaining Geometric Space'}
+          </div>
+          <div className="mt-1 inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+            Diagnostic only · not a gemstone candidate
+          </div>
+          {remainingSpaceDiagnostic?.superseded && (
+            <div className="mt-1 inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
+              Superseded by improved verified result
+            </div>
+          )}
+          <p className="mt-2 text-[10px] leading-4 text-slate-400">
+            This area represents available geometric space. Additional gems
+            require candidate fitting and manufacturing verification.
+          </p>
+          <div className="mt-2 text-[10px] leading-4 text-slate-400">
+            {remainingSpaceDiagnostic?.message
+              || remainingComponent.rejection_reason
+              || 'No verified saleable placement remained.'}
           </div>
           <div className="mt-1 text-[10px] text-slate-500">
             Inscribed estimate: {remainingComponent.estimated_inscribed_sphere_carat ?? '—'} ct
           </div>
         </div>
+      )}
+
+      {!sequenceMode && (
+        <SelectedGemPanel
+          gem={selectedGem} mmPerMesh={mmPerMesh}
+          onClear={() => onSelectGem(null)}
+        />
       )}
 
       {sequenceMode && activeStep && (
@@ -382,20 +524,33 @@ export default function ModelViewer({
       <Canvas
         camera={{ position: [0, 0, 5], fov: 45 }} dpr={[1, 2]}
         gl={{ localClippingEnabled: true, preserveDrawingBuffer: true }}
+        onPointerMissed={() => { if (!sequenceMode) onSelectGem(null); }}
       >
         <Suspense fallback={null}>
           <ambientLight intensity={2.8 * brightness} />
           <directionalLight position={[0, 10, 10]} intensity={2 * brightness} />
           <directionalLight position={[0, -10, -10]} intensity={1.6 * brightness} />
-          <Environment preset="studio" />
           <Bounds fit clip observe margin={1.25}>
             <group rotation={BACKEND_TO_VIEWER}>
               <RoughStone
                 url={modelUrl} isXRay={showCut && cutUrl && isXRay}
                 showWireframe={showWireframe} sequenceMode={sequenceMode}
               />
-              {!sequenceMode && showCut && cutUrl && (
-                <CutGem url={cutUrl} showWireframe={showWireframe} />
+              {!sequenceMode && showCut && (
+                hasIndividualGems ? (
+                  inspectableGems.map((gem) => (
+                    <InspectableGem
+                      key={gem.file || gem.index}
+                      gem={gem}
+                      isSelected={selectedGemIndex === gem.index}
+                      isMuted={selectedGemIndex !== null && selectedGemIndex !== gem.index}
+                      showWireframe={showWireframe}
+                      onSelect={onSelectGem}
+                    />
+                  ))
+                ) : (
+                  cutUrl && <CutGem url={cutUrl} showWireframe={showWireframe} />
+                )
               )}
               {sequenceMode && gemUrls.map((url, index) => (
                 <ProtectedGem

@@ -18,6 +18,7 @@ from research_completion import (
     build_manufacturing_plan,
     build_research_completion,
 )
+from mesh_artifacts import prepare_optimizer_mesh_artifacts
 
 DENSITY_QUARTZ = 2.65   # g/cm³
 CARATS_PER_GRAM = 5.0
@@ -65,6 +66,17 @@ def _optional_int(value, default=None):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _absolute_finite_volume(value, label, allow_zero=False):
+    volume = abs(float(value))
+    if (
+        not np.isfinite(volume)
+        or (not allow_zero and volume <= np.finfo(float).eps)
+    ):
+        requirement = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{label} must be finite and {requirement}.")
+    return volume
 
 
 def _optimizer_config(overrides=None):
@@ -409,6 +421,12 @@ def _build_gem_details(strat, option_index, output_dir, scale_factor,
     details = []
     placements = strat.get("placements", [])
     mm_scale = float(scale_factor * 10.0)
+    rough_volume = _absolute_finite_volume(vol_original, "Rough mesh volume")
+    plan_volume = _absolute_finite_volume(
+        plan_vol,
+        "Cut plan volume",
+        allow_zero=True,
+    )
 
     for gem_index, gem in enumerate(strat.get("gems", []), start=1):
         placement = (
@@ -417,8 +435,8 @@ def _build_gem_details(strat, option_index, output_dir, scale_factor,
             else {}
         )
         gem_volume = abs(float(placement.get("volume", 0.0) or gem.volume or 0.0))
-        volume_ratio = gem_volume / max(float(vol_original), 1e-9)
-        plan_ratio = gem_volume / max(float(plan_vol), 1e-9)
+        volume_ratio = gem_volume / rough_volume
+        plan_ratio = gem_volume / plan_volume if plan_volume > 0 else 0.0
         gem_weight = target_weight * volume_ratio
         bounds_center = gem.bounds.mean(axis=0)
         dims_mm = [round(float(e) * mm_scale, 2) for e in gem.extents]
@@ -469,7 +487,9 @@ def calculate_gem_stats(
     cut_mode="multi",
     job_folder=None,
     progress_callback=None,
-    optimizer_settings=None
+    optimizer_settings=None,
+    stage_callback=None,
+    optimizer_search_budget_multiplier=1.0,
 ):
     """
     Parameters
@@ -481,20 +501,59 @@ def calculate_gem_stats(
     job_folder      : str   - job root folder (used to locate defects.ply)
     progress_callback: callable(current, total, message)
     """
+    active_stage = None
+
+    def report_stage(stage, status, message):
+        nonlocal active_stage
+        if status == "running":
+            active_stage = stage
+        elif active_stage == stage and status in {"completed", "failed"}:
+            active_stage = None
+        if stage_callback is not None:
+            stage_callback(stage, status, message)
+
     if not os.path.exists(mesh_path):
+        report_stage(
+            "scale_calibration",
+            "running",
+            "Loading the reconstructed mesh for scale calibration...",
+        )
+        report_stage("scale_calibration", "failed", "Mesh not found")
         return {"error": "Mesh not found"}
 
     try:
-        # --- Load & center rough stone ---
-        mesh = trimesh.load(mesh_path)
-        mesh.apply_translation(-mesh.bounds.mean(axis=0))
-
-        # Save the centered stone for the 3D viewer
-        aligned_path = mesh_path.replace("final_textured_model.ply", "visual_aligned_stone.ply")
-        mesh.export(aligned_path)
+        report_stage(
+            "scale_calibration",
+            "running",
+            "Calibrating mesh scale and rough-stone measurements...",
+        )
+        # Load the canonical reconstruction without Trimesh's automatic
+        # processing, then validate each derived artifact before selection.
+        artifact_selection = prepare_optimizer_mesh_artifacts(
+            mesh_path,
+            job_folder=job_folder,
+        )
+        mesh = artifact_selection["mesh"]
+        optimizer_input = artifact_selection["optimizer_input"]
+        if artifact_selection["report"]["fallback_to_canonical"]:
+            print(
+                "Mesh artifact validation rejected the derived optimizer "
+                "mesh; using canonical final_textured_model.ply.",
+                flush=True,
+            )
 
         vol_mesh = mesh if mesh.is_watertight else mesh.convex_hull
-        vol_original = vol_mesh.volume
+        # Preserve the reconstruction topology. A consistently inward-oriented
+        # watertight mesh has a negative signed volume, but its physical volume
+        # is the positive magnitude used for scale, carat, and yield math.
+        signed_mesh_volume = float(vol_mesh.volume)
+        vol_original = _absolute_finite_volume(
+            signed_mesh_volume,
+            "Rough mesh volume",
+        )
+        mesh_orientation_corrected = bool(
+            mesh.is_watertight and signed_mesh_volume < 0
+        )
 
         # --- Scale calibration ---
         known_weight_supplied = bool(known_carats and float(known_carats) > 0)
@@ -508,7 +567,13 @@ def calculate_gem_stats(
             target_vol = vol_original * (scale_factor ** 3)
             target_weight = target_vol * DENSITY_QUARTZ * CARATS_PER_GRAM
 
+        if not np.isfinite(scale_factor) or scale_factor <= 0:
+            raise ValueError("Scale calibration produced a non-finite scale.")
         mm_per_mesh_unit = float(scale_factor * 10.0)
+        if not np.isfinite(mm_per_mesh_unit) or mm_per_mesh_unit <= 0:
+            raise ValueError(
+                "Scale calibration produced a non-finite millimetre conversion."
+            )
         opt_config = _optimizer_config(optimizer_settings)
         min_secondary_volume = None
         if known_weight_supplied and target_weight > 0:
@@ -519,22 +584,85 @@ def calculate_gem_stats(
             float(target_weight / vol_original)
             if known_weight_supplied and vol_original > 0 else None
         )
-
-        # Export unscaled mesh for optimizer (optimizer works in mesh units)
-        temp_opt_path = mesh_path.replace(".ply", "_opt_input.ply")
-        mesh.export(temp_opt_path)
+        report_stage(
+            "scale_calibration",
+            "completed",
+            "Scale calibration completed.",
+        )
 
         # --- Run optimizer ---
         # Pass preferred_shape, cut_mode, and job_folder so the optimizer can:
         #   a) filter to the user's chosen shape
         #   b) run single or multi-gem packing
         #   c) load defects.ply and avoid fractures
+        report_stage(
+            "gem_candidate_generation",
+            "running",
+            "Generating feasible gem placements...",
+        )
+        search_phase = {"stage": "gem_candidate_generation"}
+
+        def optimizer_progress(current, total, message):
+            message_text = str(message)
+            manufacturing_message = any(
+                token in message_text.casefold()
+                for token in (
+                    "cut tree",
+                    "full-through",
+                    "cut pieces",
+                )
+            )
+            if manufacturing_message and search_phase["stage"] != "manufacturing_verification":
+                if search_phase["stage"] == "gem_candidate_generation":
+                    report_stage(
+                        "gem_candidate_generation",
+                        "completed",
+                        "Gem candidate generation completed.",
+                    )
+                    report_stage(
+                        "optimization",
+                        "running",
+                        "Evaluating generated cutting strategies...",
+                    )
+                    report_stage(
+                        "optimization",
+                        "completed",
+                        "Optimization search completed.",
+                    )
+                if search_phase["stage"] == "optimization":
+                    report_stage(
+                        "optimization",
+                        "completed",
+                        "Optimization search completed.",
+                    )
+                report_stage(
+                    "manufacturing_verification",
+                    "running",
+                    message_text,
+                )
+                search_phase["stage"] = "manufacturing_verification"
+            elif (
+                search_phase["stage"] == "gem_candidate_generation"
+                and "voxel nesting placements" not in message_text.casefold()
+            ):
+                report_stage(
+                    "gem_candidate_generation",
+                    "completed",
+                    "Gem candidate generation completed.",
+                )
+                report_stage("optimization", "running", message_text)
+                search_phase["stage"] = "optimization"
+            elif search_phase["stage"] in {"optimization", "manufacturing_verification"}:
+                report_stage(search_phase["stage"], "running", message_text)
+            if progress_callback is not None:
+                progress_callback(current, total, message)
+
         strategies = optimize_cut(
-            temp_opt_path,
+            optimizer_input,
             mode=cut_mode,
             preferred_shape=preferred_shape,
             job_folder=job_folder,
-            progress_callback=progress_callback,
+            progress_callback=optimizer_progress,
             blade_kerf_mm=opt_config["blade_kerf_mm"],
             rough_clearance_mm=opt_config["rough_clearance_mm"],
             mm_per_mesh_unit=mm_per_mesh_unit,
@@ -547,14 +675,43 @@ def calculate_gem_stats(
             max_gems=opt_config["max_gems"],
             preform_margin_mm=opt_config["preform_margin_mm"],
             max_cut_depth_mm=opt_config["max_cut_depth_mm"],
+            search_budget_multiplier=optimizer_search_budget_multiplier,
         )
+        if search_phase["stage"] == "gem_candidate_generation":
+            report_stage(
+                "gem_candidate_generation",
+                "completed",
+                "Gem candidate generation completed.",
+            )
+            report_stage(
+                "optimization",
+                "running",
+                "Ranking generated cutting strategies...",
+            )
+        if search_phase["stage"] != "manufacturing_verification":
+            report_stage(
+                "optimization",
+                "completed",
+                "Optimization search completed.",
+            )
+            report_stage(
+                "manufacturing_verification",
+                "running",
+                "Verifying manufacturing constraints and exported geometry...",
+            )
 
         options_data = []
         output_dir = os.path.dirname(mesh_path)
         _clear_generated_gem_exports(output_dir)
         for i, strat in enumerate(strategies):
-            plan_vol = strat['total_volume']
-            yield_ratio = plan_vol / vol_original if vol_original > 0 else 0
+            plan_vol = _absolute_finite_volume(
+                strat['total_volume'],
+                "Cut plan volume",
+                allow_zero=True,
+            )
+            yield_ratio = plan_vol / vol_original
+            if not np.isfinite(yield_ratio):
+                raise ValueError("Yield calculation produced a non-finite value.")
             plan_weight = target_weight * yield_ratio
             yield_pct = yield_ratio * 100
             diagnostics = dict(strat.get("diagnostics", {}))
@@ -749,12 +906,22 @@ def calculate_gem_stats(
             "raw_carats": round(target_weight, 2),
             "estimated_cut_carats": best['weight'],
             "yield_percent": best['yield'],
+            "mesh_orientation_corrected": mesh_orientation_corrected,
             "recommended_shape": best['name'],
             "cut_mode": cut_mode,
             "preferred_shape": preferred_shape or "Auto",
             "space_utilization": best.get("space_utilization", {}),
             "waste_reduction": waste_reduction,
             "optimizer_diagnostics": best.get("optimizer_diagnostics", {}),
+            "mesh_artifact_validation": {
+                "status": artifact_selection["report"]["status"],
+                "fallback_to_canonical": artifact_selection["report"][
+                    "fallback_to_canonical"
+                ],
+                "selected_optimizer_mesh": artifact_selection["report"][
+                    "selected_optimizer_mesh"
+                ],
+            },
             "defect_summary": defect_summary,
             "defect_detection": defect_detection,
             "facet_recommendation": best.get("facet_recommendation", {}),
@@ -770,9 +937,16 @@ def calculate_gem_stats(
             stats,
             job_folder=job_folder,
         )
+        report_stage(
+            "manufacturing_verification",
+            "completed",
+            "Manufacturing verification completed.",
+        )
         return stats
 
     except Exception as e:
+        if active_stage is not None:
+            report_stage(active_stage, "failed", str(e))
         import traceback
         traceback.print_exc()
         return {"error": str(e)}

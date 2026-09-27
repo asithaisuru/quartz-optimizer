@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import UploadArea from './components/UploadArea';
 import PipelineHUD from './components/PipelineHUD';
+import CalculationProgressPanel from './components/CalculationProgressPanel';
 import ResultDashboard from './components/ResultDashboard';
 import { AlertTriangle, RefreshCw, Plus } from 'lucide-react';
 
@@ -24,6 +25,9 @@ function App() {
   const [reportUrl,   setReportUrl]   = useState(null);
   const [cutUrl,      setCutUrl]      = useState(null);
   const [defectsUrl,  setDefectsUrl]  = useState(null);
+  const [resultAssetBaseUrl, setResultAssetBaseUrl] = useState(null);
+  const [effectiveResultId, setEffectiveResultId] = useState(null);
+  const [effectiveReportHash, setEffectiveReportHash] = useState(null);
   const [pdfReport,   setPdfReport]   = useState(
     pdfStateFromStatus()
   );
@@ -33,7 +37,16 @@ function App() {
 
   // ----- Actions -----------------------------------------------------------
 
-  const handleFileSelect = async (files, scanMode, knownWeight, shape, mode, optimizerSettings = {}) => {
+  const handleFileSelect = async (
+    files,
+    scanMode,
+    knownWeight,
+    specimenId,
+    sourceFolder,
+    shape,
+    mode,
+    optimizerSettings = {}
+  ) => {
     if (!files || files.length === 0) return;
 
     setPreferredShape(shape);
@@ -52,7 +65,9 @@ function App() {
 
     formData.append("is_video",       hasVideo ? "true" : "false");
     formData.append("scan_mode",      scanMode);
-    if (knownWeight) formData.append("known_weight",    knownWeight);
+    formData.append("known_weight",    knownWeight);
+    formData.append("specimen_id",     specimenId);
+    formData.append("source_folder",   sourceFolder);
     if (shape)       formData.append("preferred_shape", shape);
     formData.append("cut_mode",       mode);
     Object.entries(optimizerSettings).forEach(([key, value]) => {
@@ -66,7 +81,12 @@ function App() {
       setJobId(res.data.job_id);
     } catch (err) {
       console.error(err);
-      setFailReason("Upload failed — is the backend running?");
+      const detail = err?.response?.data?.detail;
+      setFailReason(
+        typeof detail === 'string'
+          ? detail
+          : "Upload failed — is the backend running?"
+      );
       setAppState('failed');
     }
   };
@@ -86,6 +106,9 @@ function App() {
         setReportUrl(data.report_url || null);
         setCutUrl(data.cut_url       || null);
         setDefectsUrl(data.defects_url || null);
+        setResultAssetBaseUrl(data.result_asset_base_url || null);
+        setEffectiveResultId(data.effective_result_id || null);
+        setEffectiveReportHash(data.effective_report_hash || null);
         setPdfReport(pdfStateFromStatus(data));
         setAppState('completed');
 
@@ -135,6 +158,9 @@ function App() {
     setReportUrl(null);
     setCutUrl(null);
     setDefectsUrl(null);
+    setResultAssetBaseUrl(null);
+    setEffectiveResultId(null);
+    setEffectiveReportHash(null);
     setPdfReport(pdfStateFromStatus());
   };
 
@@ -163,6 +189,9 @@ function App() {
           if (data.report_url)  setReportUrl(data.report_url);
           if (data.cut_url)     setCutUrl(data.cut_url);
           if (data.defects_url) setDefectsUrl(data.defects_url);
+          setResultAssetBaseUrl(data.result_asset_base_url || null);
+          setEffectiveResultId(data.effective_result_id || null);
+          setEffectiveReportHash(data.effective_report_hash || null);
           setPdfReport(pdfStateFromStatus(data));
           setAppState('completed');
           clearInterval(interval);
@@ -204,13 +233,18 @@ function App() {
       )}
 
       {appState === 'processing' && (
-        <div className="flex flex-col items-center justify-center h-screen">
+        <div className="flex flex-col items-center justify-center min-h-screen py-8 overflow-y-auto">
           <PipelineHUD
             currentStep={statusData.step}
             progress={statusData.progress}
             message={statusData.message}
             jobId={jobId}
             onCancel={handleCancel}
+          />
+          <CalculationProgressPanel
+            apiUrl={API_URL}
+            jobId={jobId}
+            active={appState === 'processing'}
           />
         </div>
       )}
@@ -265,6 +299,9 @@ function App() {
           reportUrl={reportUrl}
           cutUrl={cutUrl}
           defectsUrl={defectsUrl}
+          resultAssetBaseUrl={resultAssetBaseUrl}
+          effectiveResultId={effectiveResultId}
+          effectiveReportHash={effectiveReportHash}
           jobId={jobId}
           pdfReportAvailable={pdfReport.available}
           pdfReportUrl={pdfReport.url}

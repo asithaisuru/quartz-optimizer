@@ -10,6 +10,8 @@ import colmap_runner  # noqa: E402
 
 
 COLMAP_411_FEATURE_HELP = """
+  --image_list_path arg
+  --FeatureExtraction.num_threads arg (=-1)
   --FeatureExtraction.use_gpu arg (=1)
   --FeatureExtraction.gpu_index arg (=-1)
   --FeatureExtraction.max_image_size arg (=-1)
@@ -18,12 +20,14 @@ COLMAP_411_FEATURE_HELP = """
 """
 
 COLMAP_LEGACY_FEATURE_HELP = """
+  --SiftExtraction.num_threads arg (=-1)
   --FeatureExtraction.use_gpu arg (=1)
   --FeatureExtraction.gpu_index arg (=-1)
   --SiftExtraction.max_image_size arg (=3200)
 """
 
 COLMAP_313_MATCHER_HELP = """
+  --FeatureMatching.num_threads arg (=-1)
   --FeatureMatching.use_gpu arg (=1)
   --FeatureMatching.gpu_index arg (=-1)
   --SiftMatching.cpu_brute_force_matcher arg (=0)
@@ -168,13 +172,23 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         matcher_flag = matcher_cmd.index("--FeatureMatching.use_gpu")
         self.assertEqual(feature_cmd[feature_flag + 1], "0")
         self.assertEqual(matcher_cmd[matcher_flag + 1], "0")
+        feature_threads = feature_cmd.index("--FeatureExtraction.num_threads")
+        matcher_threads = matcher_cmd.index("--FeatureMatching.num_threads")
+        self.assertEqual(feature_cmd[feature_threads + 1], "8")
+        self.assertEqual(matcher_cmd[matcher_threads + 1], "8")
+        feature_seed = feature_cmd.index("--default_random_seed")
+        matcher_seed = matcher_cmd.index("--default_random_seed")
+        self.assertEqual(feature_cmd[feature_seed + 1], "0")
+        self.assertEqual(matcher_cmd[matcher_seed + 1], "0")
+        two_view_seed = matcher_cmd.index("--TwoViewGeometry.random_seed")
+        self.assertEqual(matcher_cmd[two_view_seed + 1], "0")
         image_size_flag = feature_cmd.index("--FeatureExtraction.max_image_size")
         self.assertEqual(feature_cmd[image_size_flag + 1], "1200")
         self.assertNotIn("--SiftExtraction.max_image_size", feature_cmd)
         self.assertIn("--SiftExtraction.max_num_features", feature_cmd)
         self.assertIn("--SiftExtraction.peak_threshold", feature_cmd)
 
-    def test_gpu_mode_preserves_colmap_gpu_flags_for_sift_stages(self):
+    def test_gpu_capability_does_not_reenable_sift_gpu_processing(self):
         with (
             patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
             patch.object(colmap_runner, "_HAS_CUDA", True),
@@ -185,8 +199,8 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
 
         feature_flag = feature_cmd.index("--FeatureExtraction.use_gpu")
         matcher_flag = matcher_cmd.index("--FeatureMatching.use_gpu")
-        self.assertEqual(feature_cmd[feature_flag + 1], "1")
-        self.assertEqual(matcher_cmd[matcher_flag + 1], "1")
+        self.assertEqual(feature_cmd[feature_flag + 1], "0")
+        self.assertEqual(matcher_cmd[matcher_flag + 1], "0")
 
     def test_feature_image_size_falls_back_to_legacy_sift_option(self):
         def legacy_help(command):
@@ -206,16 +220,188 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         self.assertNotIn("--FeatureExtraction.max_image_size", feature_cmd)
 
     def test_feature_image_size_option_must_be_supported(self):
+        help_without_image_size = """
+          --FeatureExtraction.use_gpu arg (=1)
+          --FeatureExtraction.num_threads arg (=-1)
+        """
         with (
             patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
             patch.object(colmap_runner, "_HAS_CUDA", False),
-            patch.object(colmap_runner, "_colmap_command_help", return_value=""),
+            patch.object(
+                colmap_runner,
+                "_colmap_command_help",
+                return_value=help_without_image_size,
+            ),
         ):
             with self.assertRaises(RuntimeError) as err:
                 colmap_runner._feature_extractor_command("db.db", "images")
 
         self.assertIn("feature_extractor", str(err.exception))
         self.assertIn("max_image_size", str(err.exception))
+
+    def test_mappers_have_fixed_seed_balanced_threads_and_image_order(self):
+        cmd = colmap_runner._mapper_command(
+            "db.db",
+            "images",
+            "sparse",
+            "image-order.txt",
+        )
+        hierarchical_cmd = colmap_runner._hierarchical_mapper_command(
+            "db.db",
+            "images",
+            "sparse",
+            "image-order.txt",
+        )
+
+        self.assertEqual(cmd[cmd.index("--Mapper.random_seed") + 1], "0")
+        self.assertEqual(cmd[cmd.index("--Mapper.num_threads") + 1], "8")
+        self.assertEqual(cmd[cmd.index("--default_random_seed") + 1], "0")
+        self.assertEqual(
+            cmd[cmd.index("--Mapper.image_list_path") + 1],
+            "image-order.txt",
+        )
+        self.assertEqual(
+            hierarchical_cmd[
+                hierarchical_cmd.index("--Mapper.random_seed") + 1
+            ],
+            "0",
+        )
+        self.assertEqual(
+            hierarchical_cmd[
+                hierarchical_cmd.index("--Mapper.num_threads") + 1
+            ],
+            "8",
+        )
+        self.assertEqual(
+            hierarchical_cmd[hierarchical_cmd.index("--num_threads") + 1],
+            "8",
+        )
+        self.assertEqual(
+            hierarchical_cmd[hierarchical_cmd.index("--num_workers") + 1],
+            "1",
+        )
+
+    def test_feature_extraction_receives_sorted_image_list(self):
+        with (
+            patch.object(colmap_runner, "COLMAP_BIN", "colmap"),
+            patch.object(colmap_runner, "_colmap_command_help", side_effect=fake_help),
+        ):
+            cmd = colmap_runner._feature_extractor_command(
+                "db.db",
+                "images",
+                "image-order.txt",
+            )
+
+        self.assertEqual(
+            cmd[cmd.index("--image_list_path") + 1],
+            "image-order.txt",
+        )
+
+    def test_frame_and_dense_configuration_order_is_canonical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            images_dir = os.path.join(tmp, "images")
+            stereo_dir = os.path.join(tmp, "dense", "stereo")
+            os.makedirs(images_dir)
+            os.makedirs(stereo_dir)
+            for name in ("frame_0002.jpg", "frame_0000.jpg", "frame_0001.jpg"):
+                with open(os.path.join(images_dir, name), "wb") as handle:
+                    handle.write(b"image")
+
+            image_names = colmap_runner._sorted_image_filenames(images_dir)
+            image_list_path = colmap_runner._write_colmap_image_order(
+                tmp, image_names
+            )
+            patch_match_path = os.path.join(stereo_dir, "patch-match.cfg")
+            fusion_path = os.path.join(stereo_dir, "fusion.cfg")
+            with open(patch_match_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "frame_0002.jpg\n__auto__, 20\n"
+                    "frame_0000.jpg\n__auto__, 20\n"
+                    "frame_0001.jpg\n__auto__, 20\n"
+                )
+            with open(fusion_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "frame_0002.jpg\nframe_0000.jpg\nframe_0001.jpg\n"
+                )
+
+            result = colmap_runner._canonicalize_dense_config_order(
+                os.path.join(tmp, "dense")
+            )
+
+            with open(image_list_path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read().splitlines(), image_names)
+            with open(patch_match_path, encoding="utf-8") as handle:
+                patch_lines = handle.read().splitlines()
+            with open(fusion_path, encoding="utf-8") as handle:
+                fusion_lines = handle.read().splitlines()
+
+        self.assertEqual(
+            image_names,
+            ["frame_0000.jpg", "frame_0001.jpg", "frame_0002.jpg"],
+        )
+        self.assertEqual(
+            patch_lines[::2],
+            ["frame_0000.jpg", "frame_0001.jpg", "frame_0002.jpg"],
+        )
+        self.assertEqual(fusion_lines, image_names)
+        self.assertEqual(result, {"patch_match": True, "fusion": True})
+
+    def test_reconstruction_environment_records_runtime_and_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = os.path.join(tmp, "colmap.exe")
+            with open(executable, "wb") as handle:
+                handle.write(b"colmap-binary")
+            with (
+                patch.object(
+                    colmap_runner,
+                    "_gpu_runtime_metadata",
+                    return_value={
+                        "gpu_name": "Test GPU",
+                        "cuda_version": "12.8",
+                        "driver_version": "600.1",
+                    },
+                ),
+                patch.object(
+                    colmap_runner,
+                    "_installed_package_version",
+                    return_value="0.19.0",
+                ),
+            ):
+                output_path = colmap_runner._write_reconstruction_environment(
+                    tmp,
+                    executable,
+                    "COLMAP test",
+                    ["frame_0000.jpg"],
+                )
+            with open(output_path, encoding="utf-8") as handle:
+                metadata = colmap_runner.json.load(handle)
+
+        self.assertEqual(metadata["colmap_version"], "COLMAP test")
+        self.assertEqual(metadata["open3d_version"], "0.19.0")
+        self.assertEqual(metadata["gpu_name"], "Test GPU")
+        self.assertEqual(metadata["cuda_version"], "12.8")
+        self.assertEqual(metadata["image_order"], ["frame_0000.jpg"])
+        self.assertEqual(
+            metadata["reconstruction_settings"]["mapper"]["random_seed"],
+            0,
+        )
+        self.assertEqual(
+            metadata["reconstruction_settings"]["feature_extraction"][
+                "num_threads"
+            ],
+            8,
+        )
+        self.assertEqual(
+            metadata["sparse_execution"],
+            {
+                "feature_threads": 8,
+                "matching_threads": 8,
+                "mapper_threads": 8,
+                "gpu_enabled": False,
+                "random_seed": 0,
+            },
+        )
+        self.assertEqual(len(metadata["colmap_executable_sha256"]), 64)
 
     def test_patch_match_uses_gpu_index_zero_when_supported(self):
         with (

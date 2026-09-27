@@ -2621,10 +2621,13 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                  carats_per_mesh_volume=None,
                  extra_gem_policy=DEFAULT_EXTRA_GEM_POLICY,
                  max_gems=MAX_GEMS, preform_margin_mm=None,
-                 max_cut_depth_mm=None):
+                 max_cut_depth_mm=None, search_budget_multiplier=1.0):
     preferred_shape = _normalize_preferred_shape(preferred_shape)
     print(f"--- Optimizer | mode={mode} | shape={preferred_shape or 'auto'} ---")
     t0 = time.time()
+    search_budget_multiplier = min(
+        3.0, max(1.0, float(search_budget_multiplier or 1.0))
+    )
 
     try:
         rough = _as_mesh(trimesh.load(rough_mesh_path))
@@ -2684,6 +2687,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
         "usable_volume_mesh_units": round(usable_volume, 6),
         "no_cut_volume_mesh_units": round(no_cut_volume, 6),
         "defect_points": int(len(fpts)),
+        "search_budget_multiplier": round(search_budget_multiplier, 3),
     }
 
     print(f"   Voxel grid: {grid.shape}, pitch={pitch:.5f}")
@@ -2822,7 +2826,11 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     max_gems,
                     state_filter=_quick_cuttable_filter(ctx),
                     limit=CUTTABLE_FRONTIER_LIMIT,
-                    deadline=t0 + CUTTABLE_GLOBAL_DEADLINE_SECONDS,
+                    deadline=(
+                        t0
+                        + CUTTABLE_GLOBAL_DEADLINE_SECONDS
+                        * search_budget_multiplier
+                    ),
                 )
                 global_frontier = [
                     state for state in global_frontier if state.placements
@@ -2841,7 +2849,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                         rough,
                         ctx,
                         fpts,
-                        t0 + 68.0,
+                        t0 + 68.0 * search_budget_multiplier,
                         verification_limit=CUTTABLE_FRONTIER_LIMIT,
                     )
                 )
@@ -2857,7 +2865,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     rough,
                     ctx,
                     max_gems,
-                    t0 + 80.0,
+                    t0 + 80.0 * search_budget_multiplier,
                     "preserve_fill",
                     structural_plan=(
                         baseline_result["plan"]
@@ -2882,7 +2890,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     rough,
                     ctx,
                     max_gems,
-                    t0 + CUTTABLE_CAVITY_DEADLINE_SECONDS,
+                    t0 + CUTTABLE_CAVITY_DEADLINE_SECONDS * search_budget_multiplier,
                     "repacked_cuttable",
                 )
 
@@ -2893,7 +2901,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     rough,
                     ctx,
                     fpts,
-                    t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS,
+                    t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS * search_budget_multiplier,
                     verification_limit=3,
                     structural_plan=(
                         baseline_result["plan"]
@@ -2906,7 +2914,7 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     rough,
                     ctx,
                     fpts,
-                    t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS,
+                    t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS * search_budget_multiplier,
                     verification_limit=6,
                     refine_states=False,
                 )
@@ -2924,7 +2932,8 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     preserve_state, preserve_plan, leaf_repack_diag = (
                         _repack_leaf_pieces(
                             preserve_state, preserve_plan, rough, ctx,
-                            shapes, fpts, t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS,
+                            shapes, fpts,
+                            t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS * search_budget_multiplier,
                             preferred_shape=preferred_shape,
                         )
                     )
@@ -2973,7 +2982,8 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                     repacked_state, repacked_plan, repacked_leaf_diag = (
                         _repack_leaf_pieces(
                             repacked_state, repacked_plan, rough, ctx,
-                            shapes, fpts, t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS,
+                            shapes, fpts,
+                            t0 + CUTTABLE_TOTAL_DEADLINE_SECONDS * search_budget_multiplier,
                             preferred_shape=preferred_shape,
                         )
                     )
@@ -3066,8 +3076,9 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
     for strategy in strategies:
         diag = strategy.setdefault("diagnostics", {})
         diag["runtime_seconds"] = round(float(elapsed), 2)
-        diag["runtime_target_seconds"] = 120
-        diag["meets_runtime_target"] = elapsed <= 120.0
+        runtime_target = 120.0 * search_budget_multiplier
+        diag["runtime_target_seconds"] = round(runtime_target, 2)
+        diag["meets_runtime_target"] = elapsed <= runtime_target
 
     print(f"   Generated {len(strategies)} candidate strateg"
           f"{'y' if len(strategies) == 1 else 'ies'}.")

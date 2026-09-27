@@ -292,6 +292,67 @@ class PdfDownloadEndpointTests(unittest.TestCase):
         self.assertEqual(Path(response.path), job / "report.pdf")
         self.assertTrue(content.startswith(b"%PDF-"))
 
+    def test_effective_v2_replaces_stale_pdf_and_uses_v2_artifacts(self):
+        job_id, job = self.create_job(with_analysis=True)
+        self.write_pdf(job)
+        result_root = job / "extended_search" / "result_v2"
+        result_root.mkdir(parents=True)
+        stats = minimal_stats()
+        stats.update(
+            estimated_cut_carats=65.66,
+            yield_percent=26.9,
+            gem_details=[{"index": index} for index in range(1, 5)],
+        )
+        (result_root / "analysis_report.json").write_text(
+            json.dumps(stats), encoding="utf-8"
+        )
+        (result_root / "best_cut.ply").write_text("ply\n", encoding="utf-8")
+        (job / "extended_search" / "results.json").write_text(
+            json.dumps({"best_result": "result_v2"}), encoding="utf-8"
+        )
+        captured = {}
+
+        def generate(job_folder, received_job_id, received_stats, artifact_path=None):
+            captured.update(
+                job_id=received_job_id,
+                stats=received_stats,
+                artifact_path=artifact_path,
+            )
+            output = Path(job_folder) / "report.pdf"
+            output.write_bytes(b"%PDF-1.7\neffective v2")
+            return str(output)
+
+        with mock.patch.object(self.main, "create_pdf", side_effect=generate):
+            response = self.download(job_id)
+
+        cache = json.loads(
+            (job / self.main.PDF_CACHE_FILENAME).read_text(encoding="utf-8")
+        )
+        status = self.status(job_id)
+        self.assertEqual(Path(response.path), job / "report.pdf")
+        self.assertEqual(captured["job_id"], job_id)
+        self.assertEqual(captured["stats"]["estimated_cut_carats"], 65.66)
+        self.assertEqual(len(captured["stats"]["gem_details"]), 4)
+        self.assertEqual(Path(captured["artifact_path"]), result_root)
+        self.assertEqual(cache["selected_result_id"], "result_v2")
+        self.assertEqual(status["effective_result_id"], "result_v2")
+        self.assertIn(
+            "/extended_search/result_v2/analysis_report.json",
+            status["report_url"],
+        )
+        self.assertIn(
+            "/extended_search/result_v2/best_cut.ply",
+            status["cut_url"],
+        )
+
+        with mock.patch.object(
+            self.main,
+            "create_pdf",
+            side_effect=AssertionError("effective PDF cache was not reused"),
+        ):
+            cached_response = self.download(job_id)
+        self.assertEqual(Path(cached_response.path), job / "report.pdf")
+
     def test_report_generation_error_is_visible_in_status(self):
         job_id, job = self.create_job(with_analysis=True)
         with mock.patch.object(

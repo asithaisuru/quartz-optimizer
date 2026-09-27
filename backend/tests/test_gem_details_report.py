@@ -70,6 +70,28 @@ class GemDetailsReportTests(unittest.TestCase):
         self.assertEqual(details[1]["weight_ct"], 3.0)
         self.assertEqual(details[0]["plan_share_percent"], 87.0)
 
+    def test_zero_plan_volume_does_not_divide_by_zero(self):
+        gem = trimesh.creation.box(extents=(0.5, 0.4, 0.3))
+        strat = {
+            "shape": "Single",
+            "gems": [gem],
+            "placements": [{"volume": gem.volume}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            details = _build_gem_details(
+                strat,
+                option_index=0,
+                output_dir=tmp,
+                scale_factor=1.0,
+                target_weight=100.0,
+                vol_original=2.0,
+                plan_vol=0.0,
+            )
+
+        self.assertEqual(details[0]["plan_share_percent"], 0.0)
+        self.assertGreater(details[0]["yield_percent"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

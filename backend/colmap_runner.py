@@ -3,11 +3,20 @@ import os
 import json
 import time
 import shutil
+import hashlib
+import importlib.metadata
+import re
 import torch
 
 COLMAP_BIN_ENV = "QUARTZ_COLMAP_BIN"
 DEFAULT_COLMAP_BIN = r"D:\colmap-new\bin\colmap.exe"
 CUDA_VISIBLE_DEVICES_ENV = "CUDA_VISIBLE_DEVICES"
+RECONSTRUCTION_ENVIRONMENT_FILENAME = "reconstruction_environment.json"
+COLMAP_IMAGE_ORDER_FILENAME = "colmap_image_order.txt"
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+FEATURE_EXTRACTION_THREADS = 8
+FEATURE_MATCHING_THREADS = 8
+MAPPER_THREADS = 8
 
 
 def _clean_executable_path(path):
@@ -182,21 +191,32 @@ def _supported_gpu_use_flag(command):
     return _supported_colmap_option(command, candidates)
 
 
-def _colmap_gpu_options(command):
+def _colmap_cpu_options(command):
     flag = _supported_gpu_use_flag(command)
     if not flag:
-        return []
-    return [flag, "1" if _HAS_CUDA else "0"]
+        raise RuntimeError(
+            f"COLMAP {command} does not expose a supported CPU/GPU selector."
+        )
+    return [flag, "0"]
 
 
-def _feature_extractor_command(database_path, images_dir):
-    return [
+def _feature_extractor_command(database_path, images_dir, image_list_path=None):
+    cmd = [
         COLMAP_BIN, "feature_extractor",
         "--database_path", database_path,
         "--image_path", images_dir,
         "--ImageReader.camera_model", "SIMPLE_RADIAL",
         "--ImageReader.single_camera", "1",
-        *_colmap_gpu_options("feature_extractor"),
+        "--default_random_seed", "0",
+        *_colmap_cpu_options("feature_extractor"),
+        *_colmap_option_value(
+            "feature_extractor",
+            (
+                "--FeatureExtraction.num_threads",
+                "--SiftExtraction.num_threads",
+            ),
+            str(FEATURE_EXTRACTION_THREADS),
+        ),
         *_colmap_option_value(
             "feature_extractor",
             (
@@ -208,14 +228,60 @@ def _feature_extractor_command(database_path, images_dir):
         "--SiftExtraction.max_num_features", "4096",
         "--SiftExtraction.peak_threshold", "0.004",
     ]
+    if image_list_path:
+        cmd.extend(_colmap_option_value(
+            "feature_extractor",
+            ("--image_list_path",),
+            image_list_path,
+        ))
+    return cmd
 
 
 def _exhaustive_matcher_command(database_path):
     return [
         COLMAP_BIN, "exhaustive_matcher",
         "--database_path", database_path,
-        *_colmap_gpu_options("exhaustive_matcher"),
+        "--default_random_seed", "0",
+        *_colmap_cpu_options("exhaustive_matcher"),
+        *_colmap_option_value(
+            "exhaustive_matcher",
+            (
+                "--FeatureMatching.num_threads",
+                "--SiftMatching.num_threads",
+            ),
+            str(FEATURE_MATCHING_THREADS),
+        ),
+        "--TwoViewGeometry.random_seed", "0",
         "--ExhaustiveMatching.block_size", "50",
+    ]
+
+
+def _mapper_command(database_path, images_dir, output_path, image_list_path):
+    return [
+        COLMAP_BIN, "mapper",
+        "--database_path", database_path,
+        "--image_path", images_dir,
+        "--output_path", output_path,
+        "--default_random_seed", "0",
+        "--Mapper.random_seed", "0",
+        "--Mapper.num_threads", str(MAPPER_THREADS),
+        "--Mapper.image_list_path", image_list_path,
+    ]
+
+
+def _hierarchical_mapper_command(
+        database_path, images_dir, output_path, image_list_path):
+    return [
+        COLMAP_BIN, "hierarchical_mapper",
+        "--database_path", database_path,
+        "--image_path", images_dir,
+        "--output_path", output_path,
+        "--default_random_seed", "0",
+        "--num_threads", str(MAPPER_THREADS),
+        "--num_workers", "1",
+        "--Mapper.random_seed", "0",
+        "--Mapper.num_threads", str(MAPPER_THREADS),
+        "--Mapper.image_list_path", image_list_path,
     ]
 
 
@@ -296,6 +362,211 @@ def _looks_like_cuda_setup_failure(stderr):
     )
 
 
+def _sorted_image_filenames(images_dir):
+    return sorted(
+        (
+            name for name in os.listdir(images_dir)
+            if name.lower().endswith(IMAGE_EXTENSIONS)
+            and os.path.isfile(os.path.join(images_dir, name))
+        ),
+        key=lambda name: (name.casefold(), name),
+    )
+
+
+def _atomic_write_text(path, content):
+    temp_path = f"{path}.{os.getpid()}.tmp"
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+    os.replace(temp_path, path)
+
+
+def _write_colmap_image_order(job_path, image_names):
+    image_list_path = os.path.join(job_path, COLMAP_IMAGE_ORDER_FILENAME)
+    content = "".join(f"{name}\n" for name in image_names)
+    _atomic_write_text(image_list_path, content)
+    return image_list_path
+
+
+def _sort_patch_match_config(path):
+    if not os.path.isfile(path):
+        return False
+    with open(path, "r", encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    if len(lines) % 2:
+        raise RuntimeError(
+            f"Invalid COLMAP PatchMatch configuration (odd line count): {path}"
+        )
+    entries = [(lines[index], lines[index + 1])
+               for index in range(0, len(lines), 2)]
+    entries.sort(key=lambda entry: (entry[0].casefold(), entry[0]))
+    content = "".join(
+        f"{image_name}\n{source_specification}\n"
+        for image_name, source_specification in entries
+    )
+    _atomic_write_text(path, content)
+    return True
+
+
+def _sort_fusion_config(path):
+    if not os.path.isfile(path):
+        return False
+    with open(path, "r", encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    lines.sort(key=lambda name: (name.casefold(), name))
+    _atomic_write_text(path, "".join(f"{name}\n" for name in lines))
+    return True
+
+
+def _canonicalize_dense_config_order(dense_dir):
+    stereo_dir = os.path.join(dense_dir, "stereo")
+    return {
+        "patch_match": _sort_patch_match_config(
+            os.path.join(stereo_dir, "patch-match.cfg")
+        ),
+        "fusion": _sort_fusion_config(
+            os.path.join(stereo_dir, "fusion.cfg")
+        ),
+    }
+
+
+def _sha256_file(path):
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def _installed_package_version(distribution_name):
+    try:
+        return importlib.metadata.version(distribution_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _gpu_runtime_metadata():
+    metadata = {
+        "gpu_name": None if _GPU_NAME == "none" else _GPU_NAME,
+        "cuda_version": getattr(getattr(torch, "version", None), "cuda", None),
+        "driver_version": None,
+    }
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version",
+                "--format=csv,noheader",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            first_gpu = result.stdout.splitlines()[0]
+            parts = [part.strip() for part in first_gpu.split(",", 1)]
+            metadata["gpu_name"] = parts[0] or metadata["gpu_name"]
+            if len(parts) > 1:
+                metadata["driver_version"] = parts[1] or None
+
+        version_result = subprocess.run(
+            ["nvidia-smi"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+        version_match = re.search(
+            r"CUDA Version:\s*([0-9.]+)",
+            f"{version_result.stdout}\n{version_result.stderr}",
+        )
+        if version_match:
+            metadata["cuda_version"] = version_match.group(1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return metadata
+
+
+def _reconstruction_settings():
+    return {
+        "feature_extraction": {
+            "use_gpu": False,
+            "num_threads": FEATURE_EXTRACTION_THREADS,
+            "default_random_seed": 0,
+            "camera_model": "SIMPLE_RADIAL",
+            "single_camera": True,
+            "max_image_size": 1200,
+            "max_num_features": 4096,
+            "peak_threshold": 0.004,
+        },
+        "feature_matching": {
+            "use_gpu": False,
+            "num_threads": FEATURE_MATCHING_THREADS,
+            "default_random_seed": 0,
+            "two_view_geometry_random_seed": 0,
+            "block_size": 50,
+        },
+        "mapper": {
+            "random_seed": 0,
+            "num_threads": MAPPER_THREADS,
+        },
+        "image_undistorter": {"max_image_size": 800},
+        "patch_match_stereo": {
+            "use_gpu": True,
+            "gpu_index": 0,
+            "geom_consistency": True,
+            "window_radius": 5,
+            "num_iterations": 5,
+            "full_cuda_determinism": False,
+        },
+        "stereo_fusion": {
+            "check_num_images": 1,
+            "min_num_pixels": 5,
+        },
+        "ordering": {
+            "images": "filename ascending",
+            "database_images": "colmap_image_order.txt",
+            "patch_match_config": "reference filename ascending",
+            "fusion_config": "filename ascending",
+        },
+    }
+
+
+def _write_reconstruction_environment(
+        job_path, colmap_bin, colmap_version, image_names):
+    executable_path = os.path.abspath(colmap_bin)
+    gpu_metadata = _gpu_runtime_metadata()
+    metadata = {
+        "colmap_version": colmap_version,
+        "colmap_executable_path": executable_path,
+        "colmap_executable_sha256": _sha256_file(executable_path),
+        "open3d_version": _installed_package_version("open3d"),
+        "gpu_name": gpu_metadata["gpu_name"],
+        "cuda_version": gpu_metadata["cuda_version"],
+        "gpu_driver_version": gpu_metadata["driver_version"],
+        "sparse_execution": {
+            "feature_threads": FEATURE_EXTRACTION_THREADS,
+            "matching_threads": FEATURE_MATCHING_THREADS,
+            "mapper_threads": MAPPER_THREADS,
+            "gpu_enabled": False,
+            "random_seed": 0,
+        },
+        "reconstruction_settings": _reconstruction_settings(),
+        "image_order": list(image_names),
+    }
+    output_path = os.path.join(
+        job_path, RECONSTRUCTION_ENVIRONMENT_FILENAME
+    )
+    _atomic_write_text(
+        output_path,
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+    )
+    return output_path
+
+
 def update_status(job_path, step_name, percent, message):
     status_file = os.path.join(job_path, "status.json")
     data = {
@@ -368,8 +639,15 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
     os.makedirs(sparse_dir, exist_ok=True)
     os.makedirs(dense_dir, exist_ok=True)
 
-    n_images = len([f for f in os.listdir(images_dir)
-                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    image_names = _sorted_image_filenames(images_dir)
+    image_list_path = _write_colmap_image_order(job_path, image_names)
+    environment_path = _write_reconstruction_environment(
+        job_path,
+        colmap_bin,
+        colmap_version,
+        image_names,
+    )
+    n_images = len(image_names)
 
     print("=" * 55)
     print(f"=== COLMAP Photogrammetry Pipeline")
@@ -377,6 +655,7 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
     print(f"    Images    : {n_images}")
     print(f"    COLMAP    : {colmap_version}")
     print(f"    COLMAP exe: {colmap_bin}")
+    print(f"    Metadata  : {environment_path}")
     print(f"    PyTorch GPU: {'YES - ' + _GPU_NAME if _HAS_CUDA else 'NO (CPU only)'}")
     print("=" * 55)
 
@@ -401,7 +680,11 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
 
         update_status(job_path, "Feature Extraction", 10, "Extracting SIFT features...")
         ok, stderr = run_command(
-            _feature_extractor_command(database_path, images_dir),
+            _feature_extractor_command(
+                database_path,
+                images_dir,
+                image_list_path,
+            ),
             step_label="Feature Extractor",
             return_stderr=True,
         )
@@ -447,12 +730,15 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
         update_status(job_path, "Sparse Reconstruction", 40,
                       "Building sparse model...")
         print("\n[3/6] Sparse Reconstruction (mapper)")
-        run_command([
-            COLMAP_BIN, "mapper",
-            "--database_path", database_path,
-            "--image_path",    images_dir,
-            "--output_path",   sparse_dir,
-        ], step_label="Mapper")
+        run_command(
+            _mapper_command(
+                database_path,
+                images_dir,
+                sparse_dir,
+                image_list_path,
+            ),
+            step_label="Mapper",
+        )
     else:
         print("\n[3/6] Sparse Reconstruction — skipped (already exists)")
 
@@ -460,12 +746,15 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
 
     if not best_model_id:
         print("\n   ⚠️  Mapper produced no model — trying hierarchical_mapper...")
-        run_command([
-            COLMAP_BIN, "hierarchical_mapper",
-            "--database_path", database_path,
-            "--image_path",    images_dir,
-            "--output_path",   sparse_dir,
-        ], step_label="HierarchicalMapper")
+        run_command(
+            _hierarchical_mapper_command(
+                database_path,
+                images_dir,
+                sparse_dir,
+                image_list_path,
+            ),
+            step_label="HierarchicalMapper",
+        )
         best_model_id = get_largest_sparse_model(sparse_dir)
 
     if not best_model_id:
@@ -488,6 +777,7 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
         "--output_type",  "COLMAP",
         "--max_image_size", "800",
     ], step_label="Undistorter")
+    _canonicalize_dense_config_order(dense_dir)
 
     # ------------------------------------------------------------------
     # Step 5 — Patch-Match Stereo (GPU-accelerated if available)
@@ -504,6 +794,7 @@ def run_photogrammetry_pipeline(job_path, scan_mode="turntable"):
     # ------------------------------------------------------------------
     update_status(job_path, "Point Fusion", 90, "Fusing point cloud...")
     print("\n[6/6] Stereo Fusion")
+    _sort_fusion_config(os.path.join(dense_dir, "stereo", "fusion.cfg"))
     fused_ply_path = os.path.join(dense_dir, "fused.ply")
     run_command([
         COLMAP_BIN, "stereo_fusion",

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UploadCloud, Search, Camera, RefreshCw, Scale, Gem, Layers, Maximize2, ChevronDown, ChevronUp, Video, SlidersHorizontal, Loader2 } from 'lucide-react';
+import { UploadCloud, Search, Camera, RefreshCw, Scale, Gem, Layers, Maximize2, ChevronDown, ChevronUp, Video, SlidersHorizontal, Loader2, Tag, FolderOpen } from 'lucide-react';
 import axios from 'axios';
 import CaptureQualityPanel from './CaptureQualityPanel';
 import { checkCaptureQuality, CAPTURE_QUALITY_PHASES } from '../utils/captureQuality';
@@ -11,6 +11,8 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
   const [isDragging,    setIsDragging]    = useState(false);
   const [scanMode,      setScanMode]      = useState('turntable');
   const [knownWeight,   setKnownWeight]   = useState("");
+  const [specimenId,    setSpecimenId]    = useState("");
+  const [sourceFolder,  setSourceFolder]  = useState("");
   const [cutMode,       setCutMode]       = useState("multi");
   const [shapes,        setShapes]        = useState([]);
   const [selectedShape, setSelectedShape] = useState("");
@@ -51,6 +53,19 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
   const handleInput = (e) => submit(e.target.files);
 
   const submit = (files) => {
+    const weight = Number(knownWeight);
+    if (!specimenId.trim()) {
+      setSettingsError("Enter the specimen ID before selecting capture files.");
+      return;
+    }
+    if (!sourceFolder.trim()) {
+      setSettingsError("Enter the source folder or capture batch before selecting files.");
+      return;
+    }
+    if (!knownWeight || !Number.isFinite(weight) || weight <= 0) {
+      setSettingsError("Enter a positive rough weight in carats before reconstruction.");
+      return;
+    }
     if (cutMode === "multi") {
       const margin = Number(preformMarginMm);
       const depth = Number(maxCutDepthMm);
@@ -98,7 +113,9 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
     onFileSelect(
       stagedFiles,
       scanMode,
-      knownWeight || null,
+      knownWeight,
+      specimenId.trim(),
+      sourceFolder.trim(),
       selectedShape || null,
       cutMode,
       {
@@ -175,6 +192,46 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
         stagedFiles ? 'opacity-50 pointer-events-none' : ''
       }`}>
 
+        {/* SPECIMEN ID */}
+        <div className="bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-3 flex items-center gap-3 backdrop-blur-md">
+          <div className="bg-slate-800 p-2 rounded-lg text-cyan-400">
+            <Tag className="w-4 h-4" />
+          </div>
+          <div className="flex-1">
+            <label className="block text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+              Specimen ID (required)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. QZ-07"
+              className="w-full bg-transparent text-white font-mono outline-none placeholder:text-slate-600"
+              value={specimenId}
+              onChange={(e) => setSpecimenId(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+
+        {/* SOURCE FOLDER */}
+        <div className="bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-3 flex items-center gap-3 backdrop-blur-md">
+          <div className="bg-slate-800 p-2 rounded-lg text-blue-400">
+            <FolderOpen className="w-4 h-4" />
+          </div>
+          <div className="flex-1">
+            <label className="block text-[10px] text-slate-400 uppercase font-bold tracking-wider">
+              Source Folder / Capture Batch (required)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. 2026-09-25/QZ-07"
+              className="w-full bg-transparent text-white font-mono outline-none placeholder:text-slate-600"
+              value={sourceFolder}
+              onChange={(e) => setSourceFolder(e.target.value)}
+              required
+            />
+          </div>
+        </div>
+
         {/* WEIGHT INPUT */}
         <div className="bg-slate-900/60 border border-slate-700 rounded-xl px-4 py-3 flex items-center gap-3 backdrop-blur-md">
           <div className="bg-slate-800 p-2 rounded-lg text-emerald-400">
@@ -182,14 +239,17 @@ export default function UploadArea({ onFileSelect, onRecoverJob }) {
           </div>
           <div className="flex-1">
             <label className="block text-[10px] text-slate-400 uppercase font-bold tracking-wider">
-              Rough Weight (optional)
+              Rough Weight (required)
             </label>
             <input
               type="number"
+              min="0.000001"
+              step="any"
               placeholder="e.g. 15.5"
               className="w-full bg-transparent text-white font-mono outline-none placeholder:text-slate-600"
               value={knownWeight}
               onChange={(e) => setKnownWeight(e.target.value)}
+              required
             />
           </div>
           <span className="text-xs font-bold text-slate-500">CTS</span>

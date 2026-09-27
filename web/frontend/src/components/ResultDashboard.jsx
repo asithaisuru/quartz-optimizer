@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import ModelViewer from './ModelViewer';
+import MetricHelp from './MetricHelp';
+import ExtendedSearchPanel from './ExtendedSearchPanel';
 import { downloadPdf, resolveBackendUrl } from '../utils/pdfDownload';
 import {
   Download, Layers, Box, Scale, Edit2, Check, X,
@@ -10,9 +12,63 @@ import {
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+const withCacheBust = (url) => {
+  if (!url) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
+};
+
 const settingValue = (value, fallback) => {
   if (value === undefined || value === null || value === "") return fallback;
   return String(value);
+};
+
+// Canned fallback text per extended-search evaluation state, used only if
+// the backend's own remaining_space_metadata.diagnostic_message is ever
+// missing for a recognized state — the backend already sends this exact
+// wording today, so this map is a defensive backstop, not the primary
+// source. Deliberately avoids any "impossible" / "exhaustive" claim the
+// bounded optimizer can't back up.
+const REMAINING_SPACE_FALLBACK_MESSAGES = {
+  extended_search_running:
+    'Extended search is currently re-evaluating this remaining geometric space.',
+  extended_search_completed_no_candidate:
+    'Extended search completed. No higher-yield verified gemstone placement was found in this remaining geometric space.',
+  extended_search_completed_candidate_found:
+    'Extended search found an improved verified result. This remaining-space diagnostic is superseded by the updated plan.',
+  extended_search_resource_stopped:
+    'Extended search stopped at an implemented resource boundary before proving any higher-yield verified placement for this remaining geometric space.',
+  extended_search_cancelled:
+    'Extended search was stopped before final evaluation of this remaining geometric space.',
+  extended_search_failed:
+    'Extended search failed before final evaluation of this remaining geometric space.',
+};
+
+// Merges the (possibly stale) analysis_report rejection_reason with the
+// live extended-search remaining_space_metadata, per priority: extended
+// search's own current evaluation state wins whenever one has actually
+// been recorded; the original report text is the fallback shown only
+// before any extended search has ever run for this job.
+const buildRemainingSpaceDiagnostic = (reportRejectionReason, extendedSearchStatus) => {
+  const metadata = extendedSearchStatus?.remaining_space_metadata || null;
+  const evaluationStatus = metadata?.search_evaluation_status || null;
+
+  if (!evaluationStatus || evaluationStatus === 'initial_bounded_search') {
+    return {
+      heading: 'Initial bounded search diagnostic',
+      message: reportRejectionReason || metadata?.diagnostic_message
+        || 'No verified saleable placement remained.',
+      superseded: false,
+    };
+  }
+
+  return {
+    heading: 'Remaining Geometric Space',
+    message: metadata?.diagnostic_message
+      || REMAINING_SPACE_FALLBACK_MESSAGES[evaluationStatus]
+      || reportRejectionReason
+      || 'No verified saleable placement remained.',
+    superseded: evaluationStatus === 'extended_search_completed_candidate_found',
+  };
 };
 
 const readOptimizerSettings = (report, option) => {
@@ -43,6 +99,7 @@ const readOptimizerSettings = (report, option) => {
 
 export default function ResultDashboard({
   modelUrl, reportUrl, cutUrl, defectsUrl,
+  resultAssetBaseUrl, effectiveResultId, effectiveReportHash,
   initialShape, initialCutMode, jobId: jobIdProp,
   pdfReportAvailable, pdfReportUrl, pdfReportFilename, pdfReportError
 }) {
@@ -69,7 +126,17 @@ export default function ResultDashboard({
 
   // 3D viewer URLs
   const [activeCutUrl,   setActiveCutUrl]   = useState(cutUrl);
+  const [activeAssetBaseUrl, setActiveAssetBaseUrl] = useState(
+    resolveBackendUrl(resultAssetBaseUrl, API_URL)
+  );
+  const activeResultIdRef = useRef(effectiveResultId || "result_v1");
+  const activeReportHashRef = useRef(effectiveReportHash || null);
   const [showFractures,  setShowFractures]  = useState(true);
+  const [selectedGemIndex, setSelectedGemIndex] = useState(null);
+  // Latest raw status payload from ExtendedSearchPanel's own polling
+  // (includes remaining_space_metadata) — null until that panel has
+  // fetched something, or if extended search isn't available at all.
+  const [extendedSearchStatus, setExtendedSearchStatus] = useState(null);
 
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
@@ -85,6 +152,15 @@ export default function ResultDashboard({
 
   const reportJobMatch = reportUrl?.match(/\/files\/([^/]+)\//);
   const jobId = jobIdProp || reportJobMatch?.[1] || null;
+  const effectiveAssetBaseUrl = (
+    activeAssetBaseUrl
+    || resolveBackendUrl(resultAssetBaseUrl, API_URL)
+    || (jobId ? `${API_URL}/files/${jobId}/dense` : null)
+  );
+  const resultAssetUrl = (filename) => {
+    if (!effectiveAssetBaseUrl || !filename) return null;
+    return `${effectiveAssetBaseUrl.replace(/\/+$/, '')}/${filename}`;
+  };
 
   const applyOptimizerSettings = (report, option = null) => {
     const settings = readOptimizerSettings(report, option);
@@ -104,7 +180,12 @@ export default function ResultDashboard({
       .catch(() => {});
   }, []);
 
-  useEffect(() => { setActiveCutUrl(cutUrl); }, [cutUrl]);
+  useEffect(() => {
+    setActiveCutUrl(resolveBackendUrl(cutUrl, API_URL));
+    setActiveAssetBaseUrl(resolveBackendUrl(resultAssetBaseUrl, API_URL));
+    activeResultIdRef.current = effectiveResultId || "result_v1";
+    activeReportHashRef.current = effectiveReportHash || null;
+  }, [cutUrl, resultAssetBaseUrl, effectiveResultId, effectiveReportHash]);
 
   useEffect(() => {
     setPdfState({
@@ -122,9 +203,17 @@ export default function ResultDashboard({
 
   useEffect(() => {
     if (!reportUrl) return;
-    axios.get(`${reportUrl}?t=${Date.now()}`)
+    const resolvedReportUrl = resolveBackendUrl(reportUrl, API_URL);
+    const resolvedAssetBase = (
+      resolveBackendUrl(resultAssetBaseUrl, API_URL)
+      || (jobId ? `${API_URL}/files/${jobId}/dense` : null)
+    );
+    axios.get(withCacheBust(resolvedReportUrl))
       .then(res => {
         if (res.data && !res.data.error) {
+          setActiveAssetBaseUrl(resolvedAssetBase);
+          activeResultIdRef.current = effectiveResultId || "result_v1";
+          activeReportHashRef.current = effectiveReportHash || null;
           setData(res.data);
           if (res.data.options?.length) {
             const defaultOption = res.data.options[0];
@@ -135,9 +224,10 @@ export default function ResultDashboard({
             // showing the raw job cut_url (best_cut.ply) while the
             // sidebar already described options[0], which could be a
             // different strategy.
-            if (defaultOption.file && jobId) {
-              const base = `${API_URL}/files/${jobId}/dense/`;
-              setActiveCutUrl(`${base}${defaultOption.file}?t=${Date.now()}`);
+            if (defaultOption.file && resolvedAssetBase) {
+              setActiveCutUrl(withCacheBust(
+                `${resolvedAssetBase.replace(/\/+$/, '')}/${defaultOption.file}`
+              ));
             }
           } else {
             applyOptimizerSettings(res.data);
@@ -145,17 +235,78 @@ export default function ResultDashboard({
         }
       })
       .catch(err => console.error("Could not load stats", err));
-  }, [reportUrl, jobId]);
+  }, [
+    reportUrl,
+    jobId,
+    resultAssetBaseUrl,
+    effectiveResultId,
+    effectiveReportHash,
+  ]);
 
   useEffect(() => () => { if (pollTimer.current) clearInterval(pollTimer.current); }, []);
 
   const handleSelectOption = (opt) => {
     setSelectedOption(opt);
     applyOptimizerSettings(data, opt);
+    setSelectedGemIndex(null);
     if (opt.file) {
-      const base = `${API_URL}/files/${jobId}/dense/`;
-      setActiveCutUrl(`${base}${opt.file}?t=${Date.now()}`);
+      setActiveCutUrl(withCacheBust(resultAssetUrl(opt.file)));
     }
+  };
+
+  const handleExtendedStatusChange = (status) => {
+    setExtendedSearchStatus(status);
+    if (!status) return;
+
+    if (Object.prototype.hasOwnProperty.call(status, 'pdf_report_available')) {
+      setPdfState({
+        available: Boolean(status.pdf_report_available),
+        url: status.pdf_report_url || null,
+        filename: status.pdf_report_filename || null,
+      });
+      setPdfDownloadError(status.pdf_report_error || "");
+    }
+
+    const nextResultId = status.effective_result_id || null;
+    const nextReportHash = status.effective_report_hash || null;
+    const nextReportUrl = resolveBackendUrl(status.report_url, API_URL);
+    const nextAssetBase = resolveBackendUrl(
+      status.result_asset_base_url,
+      API_URL
+    );
+    const selectionChanged = (
+      nextResultId
+      && (
+        nextResultId !== activeResultIdRef.current
+        || nextReportHash !== activeReportHashRef.current
+      )
+    );
+    if (!selectionChanged || !nextReportUrl || !nextAssetBase) return;
+
+    activeResultIdRef.current = nextResultId;
+    activeReportHashRef.current = nextReportHash;
+    setActiveAssetBaseUrl(nextAssetBase);
+    axios.get(withCacheBust(nextReportUrl))
+      .then(res => {
+        if (!res.data || res.data.error) return;
+        setData(res.data);
+        setSelectedGemIndex(null);
+        if (res.data.options?.length) {
+          const defaultOption = res.data.options[0];
+          setSelectedOption(defaultOption);
+          applyOptimizerSettings(res.data, defaultOption);
+          if (defaultOption.file) {
+            setActiveCutUrl(withCacheBust(
+              `${nextAssetBase.replace(/\/+$/, '')}/${defaultOption.file}`
+            ));
+          }
+        } else {
+          setSelectedOption(null);
+          applyOptimizerSettings(res.data);
+          setActiveCutUrl(resolveBackendUrl(status.cut_url, API_URL));
+        }
+      })
+      .catch(err => console.error("Could not load effective result", err));
   };
 
   const handleCopyId = () => {
@@ -189,7 +340,12 @@ export default function ResultDashboard({
   };
 
   const handleSaveWeight = async () => {
-    if (!tempWeight || !jobId) return;
+    if (!jobId) return;
+    const roughWeight = Number(tempWeight);
+    if (!tempWeight || !Number.isFinite(roughWeight) || roughWeight <= 0) {
+      setStatusMessage("Enter a positive rough weight in carats.");
+      return;
+    }
     if (cutMode === "multi") {
       const margin = Number(preformMarginMm);
       const depth = Number(maxCutDepthMm);
@@ -246,16 +402,34 @@ export default function ResultDashboard({
               filename: s.pdf_report_filename || null,
             });
             setPdfDownloadError(s.pdf_report_error || "");
-            const rr = await axios.get(`${s.report_url}?t=${ts}`);
+            const nextAssetBase = (
+              resolveBackendUrl(s.result_asset_base_url, API_URL)
+              || `${API_URL}/files/${jobId}/dense`
+            );
+            setActiveAssetBaseUrl(nextAssetBase);
+            activeResultIdRef.current = s.effective_result_id || "result_v1";
+            activeReportHashRef.current = s.effective_report_hash || null;
+            const rr = await axios.get(withCacheBust(
+              resolveBackendUrl(s.report_url, API_URL)
+            ));
             setData(rr.data);
             if (rr.data.options?.length) {
-              setSelectedOption(rr.data.options[0]);
-              applyOptimizerSettings(rr.data, rr.data.options[0]);
-              handleSelectOption(rr.data.options[0]);
+              const defaultOption = rr.data.options[0];
+              setSelectedOption(defaultOption);
+              setSelectedGemIndex(null);
+              applyOptimizerSettings(rr.data, defaultOption);
+              if (defaultOption.file) {
+                setActiveCutUrl(withCacheBust(
+                  `${nextAssetBase.replace(/\/+$/, '')}/${defaultOption.file}`
+                ));
+              }
             } else {
+              setSelectedOption(null);
               applyOptimizerSettings(rr.data);
+              if (s.cut_url) {
+                setActiveCutUrl(resolveBackendUrl(s.cut_url, API_URL));
+              }
             }
-            if (s.cut_url) setActiveCutUrl(`${s.cut_url}&t=${ts}`);
             setIsUpdating(false);
             setIsEditing(false);
           } else if (s.status === "Failed") {
@@ -333,8 +507,15 @@ export default function ResultDashboard({
     ?? optimizerDiag?.fit?.rough_clearance_mm
     ?? null;
   const pocketAdded       = recoverySearch?.added_to_best ?? pocketFill?.added ?? 0;
-  const unusedReason      = remainingSpace?.components?.[0]?.rejection_reason
-    ?? pocketFill?.unused_space_reason ?? '—';
+  const reportRejectionReason = remainingSpace?.components?.[0]?.rejection_reason
+    ?? pocketFill?.unused_space_reason ?? null;
+  // Reflects extended search's current findings for this space when one has
+  // run, instead of always showing the original (possibly stale) report
+  // text — see buildRemainingSpaceDiagnostic.
+  const remainingSpaceDiagnostic = buildRemainingSpaceDiagnostic(
+    reportRejectionReason, extendedSearchStatus
+  );
+  const unusedReason      = remainingSpaceDiagnostic.message || '—';
   const displayedMaxGems  = optimizerSettings?.max_gems ?? maxGems;
   const displayedMinCarat = optimizerSettings?.min_secondary_carat ?? minGemCarat;
   const displayedPolicy   = optimizerSettings?.extra_gem_policy ?? extraGemPolicy;
@@ -344,7 +525,14 @@ export default function ResultDashboard({
     : [];
   const gemUrls = gemDetails
     .filter((gem) => gem?.file)
-    .map((gem) => `${API_URL}/files/${jobId}/dense/${gem.file}`);
+    .map((gem) => resultAssetUrl(gem.file));
+  // Same gem_details the sidebar renders, augmented with a resolvable PLY
+  // URL per gem so ModelViewer can render/select each one individually in
+  // Inspect mode without needing to know about API_URL/jobId itself.
+  const gemDetailsWithUrl = gemDetails.map((gem) => ({
+    ...gem,
+    url: resultAssetUrl(gem?.file),
+  }));
 
   return (
     <div className="min-h-screen w-full flex flex-col overflow-auto lg:h-screen lg:flex-row lg:overflow-hidden">
@@ -356,10 +544,14 @@ export default function ResultDashboard({
           cutUrl={activeCutUrl}
           defectsUrl={showFractures ? defectsUrl : null}
           gemUrls={gemUrls}
+          gemDetails={gemDetailsWithUrl}
           manufacturingPlan={manufacturingPlan}
           remainingSpace={remainingSpace}
+          remainingSpaceDiagnostic={remainingSpaceDiagnostic}
           activeStrategyName={currentShape}
           activeGemCount={gemCount}
+          selectedGemIndex={selectedGemIndex}
+          onSelectGem={setSelectedGemIndex}
         />
       </div>
 
@@ -411,6 +603,8 @@ export default function ResultDashboard({
               <div className="flex items-center gap-2">
                 <input
                   type="number"
+                  min="0.000001"
+                  step="any"
                   className="w-24 bg-black/40 border border-emerald-500/50 rounded px-2 py-1 text-xl text-white font-bold outline-none focus:border-emerald-400"
                   autoFocus
                   defaultValue={data?.raw_carats ?? ""}
@@ -678,8 +872,9 @@ export default function ResultDashboard({
             </div>
             <div className="flex justify-between items-center mt-2">
               <p className="text-[10px] text-slate-500">{currentShape}</p>
-              <p className={`text-xs font-bold ${isOptimized ? "text-purple-400" : "text-cyan-400"}`}>
+              <p className={`text-xs font-bold flex items-center ${isOptimized ? "text-purple-400" : "text-cyan-400"}`}>
                 {currentYield}% Yield
+                <MetricHelp metricKey="yield" align="right" />
               </p>
             </div>
           </div>
@@ -690,6 +885,7 @@ export default function ResultDashboard({
               <div className="flex items-center gap-2">
                 <Scale className="w-4 h-4 text-emerald-400" />
                 <span className="text-slate-300">Space Utilization</span>
+                <MetricHelp metricKey="spaceUtilization" />
               </div>
               <span className="font-mono font-bold text-emerald-400">{utilizationPct}%</span>
             </div>
@@ -699,7 +895,10 @@ export default function ResultDashboard({
             </div>
             <div className="flex justify-between mt-2 text-[10px] text-slate-500">
               <span>Axis: {axisUtil.length ? axisUtil.join(' / ') : '—'}%</span>
-              <span>Waste: {wasteReduction?.projected_waste_percent ?? (100 - currentYield).toFixed(1)}%</span>
+              <span className="flex items-center">
+                Waste: {wasteReduction?.projected_waste_percent ?? (100 - currentYield).toFixed(1)}%
+                <MetricHelp metricKey="waste" align="right" />
+              </span>
             </div>
             {wasteReduction?.traditional_waste_baseline_percent !== undefined && (
               <>
@@ -719,6 +918,7 @@ export default function ResultDashboard({
               <div className="flex items-center gap-2">
                 <Layers className="w-4 h-4 text-cyan-400" />
                 <span className="text-slate-300">Manufacturing Clearance</span>
+                <MetricHelp metricKey="manufacturingClearance" />
               </div>
               <span className={`font-mono font-bold text-sm ${
                 bladeClearance?.meets_target === false ? 'text-orange-400' : 'text-cyan-400'
@@ -768,6 +968,7 @@ export default function ResultDashboard({
                   ? <ShieldCheck className="w-4 h-4 text-emerald-400" />
                   : <ListOrdered className="w-4 h-4 text-amber-400" />}
                 <span className="text-slate-300">Saw Sequence</span>
+                <MetricHelp metricKey="sawSequence" />
               </div>
               <span className={`font-mono text-xs ${
                 manufacturingPlan?.status === 'complete' ? 'text-emerald-400' : 'text-amber-400'
@@ -803,6 +1004,7 @@ export default function ResultDashboard({
                 <div className="flex items-center gap-2">
                   <Gem className="w-4 h-4 text-pink-400" />
                   <span className="text-slate-300">Gem Details</span>
+                  <MetricHelp metricKey="planShare" />
                 </div>
                 <span className="font-mono text-xs text-pink-300">
                   {gemDetails.length}
@@ -810,9 +1012,17 @@ export default function ResultDashboard({
               </div>
               <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
                 {gemDetails.map((gem) => (
-                  <div
+                  <button
                     key={gem.index}
-                    className="bg-slate-900 rounded p-2 border border-slate-800"
+                    type="button"
+                    onClick={() => setSelectedGemIndex(
+                      (current) => (current === gem.index ? null : gem.index)
+                    )}
+                    className={`w-full text-left bg-slate-900 rounded p-2 border transition-colors ${
+                      selectedGemIndex === gem.index
+                        ? 'border-cyan-400 ring-1 ring-cyan-400/40'
+                        : 'border-slate-800 hover:border-slate-600'
+                    }`}
                   >
                     <div className="flex justify-between gap-2">
                       <div className="min-w-0">
@@ -834,7 +1044,7 @@ export default function ResultDashboard({
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </div>
@@ -848,15 +1058,15 @@ export default function ResultDashboard({
               <summary className="flex cursor-pointer list-none items-center justify-between p-4 text-slate-400 hover:text-slate-300">
                 <div className="flex items-center gap-2">
                   <Check className="w-4 h-4 text-emerald-400" />
-                  <span>Advanced Diagnostics</span>
+                  <span>Implementation Alignment</span>
                 </div>
                 <span className="font-mono text-xs text-slate-500 group-open:hidden">
-                  {softwareComplete}% proposal alignment
+                  {softwareComplete}% implementation alignment
                 </span>
               </summary>
               <div className="px-4 pb-4">
                 <div className="flex items-center justify-between mb-3">
-                  <span className="text-slate-300">Proposal Alignment</span>
+                  <span className="text-slate-300">Implementation Alignment</span>
                   <span className="font-mono font-bold text-emerald-400">
                     {softwareComplete}%
                   </span>
@@ -883,6 +1093,7 @@ export default function ResultDashboard({
             <div className="flex items-center gap-2 mb-3">
               <SunDim className="w-4 h-4 text-yellow-400" />
               <span className="text-slate-300">Light Performance</span>
+              <MetricHelp metricKey="lightPerformance" />
             </div>
             <div className="flex justify-between items-end">
               <div>
@@ -907,11 +1118,17 @@ export default function ResultDashboard({
             </div>
             <div className="grid grid-cols-2 gap-2 text-center">
               <div className="bg-slate-900 rounded p-2">
-                <div className="text-xs text-slate-500">Defects</div>
+                <div className="flex items-center justify-center text-xs text-slate-500">
+                  Defects
+                  <MetricHelp metricKey="defectCount" align="right" />
+                </div>
                 <div className="font-mono text-white">{defectSummary?.point_count ?? 0}</div>
               </div>
               <div className="bg-slate-900 rounded p-2">
-                <div className="text-xs text-slate-500">Facet Score</div>
+                <div className="flex items-center justify-center text-xs text-slate-500">
+                  Facet Score
+                  <MetricHelp metricKey="facetScore" align="right" />
+                </div>
                 <div className="font-mono text-white">{facetPlan?.score ?? 0}</div>
               </div>
             </div>
@@ -936,6 +1153,15 @@ export default function ResultDashboard({
             </div>
             <p className="text-[10px] text-slate-500 mt-2 text-center">Measurements in mm</p>
           </div>
+
+          {/* Extended search — renders nothing if the backend doesn't
+              support it yet, so this is safe to always mount. */}
+          {jobId && (
+            <ExtendedSearchPanel
+              apiUrl={API_URL} jobId={jobId}
+              onStatusChange={handleExtendedStatusChange}
+            />
+          )}
         </div>
 
         {/* ACTIONS */}

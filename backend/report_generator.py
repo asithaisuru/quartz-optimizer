@@ -927,9 +927,10 @@ def _write_optimization_summary(pdf, stats):
     )
 
 
-def _write_blueprints(pdf, job_folder, job_id, stats):
-    rough_path = os.path.join(job_folder, "dense", "visual_aligned_stone.ply")
-    cut_path = os.path.join(job_folder, "dense", "best_cut.ply")
+def _write_blueprints(pdf, job_folder, job_id, stats, artifact_path=None):
+    artifact_path = artifact_path or os.path.join(job_folder, "dense")
+    rough_path = os.path.join(artifact_path, "visual_aligned_stone.ply")
+    cut_path = os.path.join(artifact_path, "best_cut.ply")
     generated = []
     if not (os.path.isfile(rough_path) and os.path.isfile(cut_path)):
         _section_title(
@@ -1361,8 +1362,10 @@ def _write_notes_and_limitations(pdf, stats):
         _callout(pdf, title, value, kind="warning")
 
 
-def create_pdf(job_folder, job_id, stats):
+def create_pdf(job_folder, job_id, stats, artifact_path=None):
     job_folder = os.path.abspath(job_folder)
+    if artifact_path is not None:
+        artifact_path = os.path.abspath(artifact_path)
     os.makedirs(job_folder, exist_ok=True)
     stats = stats if isinstance(stats, dict) else {}
     generated_at = datetime.now()
@@ -1374,7 +1377,13 @@ def create_pdf(job_folder, job_id, stats):
     _write_analysis_overview(pdf, stats)
     _write_defect_summary(pdf, stats)
     _write_optimization_summary(pdf, stats)
-    blueprint_paths = _write_blueprints(pdf, job_folder, job_id, stats)
+    blueprint_paths = _write_blueprints(
+        pdf,
+        job_folder,
+        job_id,
+        stats,
+        artifact_path=artifact_path,
+    )
     _write_gem_details(pdf, stats.get("gem_details"))
     _write_manufacturing_plan(pdf, stats.get("manufacturing_plan") or {})
     _write_notes_and_limitations(pdf, stats)
