@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import qz01 from '../test/fixtures/qz01_analysis_report.json';
 import qz05 from '../test/fixtures/qz05_analysis_report.json';
 import { installMockApi } from '../test/mockApi';
@@ -125,5 +125,61 @@ describe('ResultDashboard preform integration', () => {
     fireEvent.click(await screen.findByText('Open Defect Review'));
     expect(viewerProps.current.viewerMode).toBe('defects');
     expect(screen.getByText('Add Defect')).toBeTruthy();
+  });
+});
+
+describe('ResultDashboard Expert Review integration', () => {
+  const STATUS = { run_id: 'run1', status: 'completed', mode: 'preform_recovery', message: 'done' };
+  const FRAME = { mm_per_mesh_unit: 20, canonical_to_centered_translation_mesh_units: [0, 0, 0] };
+  const RESULT = {
+    mode: 'preform_recovery', recovery_basis: 'retained_preform_mass', rough_weight_ct: 431.25,
+    target_recovery_percent: 85, target_recovery_source: 'expert_defined', target_applicable: true,
+    target_context: 'defect_free', retained_preform_weight_ct: 9.54, preform_recovery_percent: 2.21,
+    target_met: false, estimated_kerf_loss_ct: 1, confirmed_defect_excluded_ct: 0, regions: [], cuts: [],
+    manufacturing_status: 'complete', search_state: 'bounded_search_complete', message: 'ok',
+    coordinate_frame: FRAME,
+  };
+  const REVIEW = {
+    schema_version: 1, job_id: 'job1', run_id: 'run1',
+    reviewer: { name: '', code: null, experience_years: null },
+    target_applicable: true, target_recovery_percent: 85,
+    pieces: [
+      { piece_id: 'P2', parent_piece_id: 'P1', created_by_cut_id: 'C1', weight_ct: 300, auto_usable: false, auto_usability_status: 'requires_further_separation', morphology: 'blocky', suggested_finish_shapes: [], mesh_file: '/files/job1/preform_recovery/run1/R1.ply', review_required: true, decision: 'pending', reason_code: null, notes: '', reviewed_at: null },
+      { piece_id: 'P3', parent_piece_id: 'P1', created_by_cut_id: 'C1', weight_ct: 100, auto_usable: true, auto_usability_status: 'usable_preform', morphology: 'pointed', suggested_finish_shapes: [], mesh_file: null, review_required: false, decision: 'pending', reason_code: null, notes: '', reviewed_at: null },
+      { piece_id: 'P4', parent_piece_id: 'P1', created_by_cut_id: 'C1', weight_ct: 1, auto_usable: false, auto_usability_status: 'too_small', morphology: 'irregular', suggested_finish_shapes: [], mesh_file: '/files/../../secret.ply', review_required: true, decision: 'pending', reason_code: null, notes: '', reviewed_at: null },
+    ],
+    summary: { rough_weight_ct: 431.25, physical_retained_weight_ct: 429, physical_retention_percent: 99.49, auto_validated_usable_weight_ct: 9.54, auto_validated_usable_recovery_percent: 2.21, expert_confirmed_additional_usable_weight_ct: 0, review_adjusted_usable_weight_ct: 9.54, review_adjusted_usable_recovery_percent: 2.21, pending_review_weight_ct: 301, needs_further_separation_weight_ct: 0, expert_unusable_weight_ct: 0, review_required_count: 2, reviewed_count: 0, review_complete: false, target_status: 'pending_review' },
+  };
+  const openExpert = async (report) => {
+    await screen.findByText(String(report.raw_carats));
+    act(() => viewerProps.current.onViewerModeChange('expert'));
+  };
+
+  it('shows the V2-only unavailable state for an older (V1) completed result', async () => {
+    renderDashboard(qz01, {
+      'GET /preform-recovery/status': STATUS,
+      'GET /preform-recovery/result': { ...RESULT, run_id: 'run1' },
+    });
+    await openExpert(qz01);
+    expect(await screen.findByText('Expert Review is available for Preform Recovery V2 results.')).toBeTruthy();
+    expect(viewerProps.current.viewerMode).toBe('expert');
+  });
+
+  it('loads a V2 run review and passes safely resolved piece meshes to the viewer', async () => {
+    renderDashboard(qz05, {
+      'GET /preform-recovery/status': STATUS,
+      'GET /preform-recovery/result': { ...RESULT, run_id: 'run1', recovery_model_version: 'v2_usable_preform' },
+      'GET /jobs/job1/preform-recovery/run1/expert-review': REVIEW,
+    });
+    await openExpert(qz05);
+    expect(await screen.findByLabelText('Expert review recovery summary')).toBeTruthy();
+    await waitFor(() => expect(viewerProps.current.expertReview?.pieces).toHaveLength(3));
+    const pieces = viewerProps.current.expertReview.pieces;
+    expect(pieces[0]).toEqual({ piece_id: 'P2', state: 'pending', resolvedUrl: 'http://localhost:8000/files/job1/preform_recovery/run1/R1.ply' });
+    expect(pieces[1]).toEqual({ piece_id: 'P3', state: 'auto_usable', resolvedUrl: null });
+    expect(pieces[2].resolvedUrl).toBeNull(); // path escape rejected
+    expect(viewerProps.current.expertReview.frame).toEqual({ mmPerMesh: 20, translation: [0, 0, 0] });
+    // Legacy optimizer mode stays selected; the legacy cards remain.
+    expect(screen.getByRole('radio', { name: 'Legacy Faceted Packing' }).getAttribute('aria-checked')).toBe('true');
   });
 });

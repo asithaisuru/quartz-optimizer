@@ -72,6 +72,24 @@ export const METRIC_EXPLANATIONS = {
     meaning: 'A practical target for how much of a defect-free/preform rough should remain useful, set by the consulting gemstone expert. Default 85%, editable.',
     boundary: 'An expert-defined reference, not a universal gemstone-industry figure or a guaranteed yield. It does not apply as a pass/fail test when confirmed defects constrain the rough.',
   },
+  physicalRetention: {
+    title: 'Physical Material Retention',
+    formula: 'Physical retention % = (physically retained weight ÷ rough weight) × 100',
+    meaning: 'Material physically kept by the selected plan after modelled kerf, confirmed-defect exclusions and explicit discards.',
+    boundary: 'Retained material is not automatically usable. It is not polished gemstone yield.',
+  },
+  autoValidatedUsable: {
+    title: 'Auto-Validated Usable Recovery',
+    formula: 'Auto-validated % = (weight of pieces passing the automatic usability screen ÷ rough weight) × 100',
+    meaning: 'Physical pieces the backend could validate automatically as usable preforms.',
+    boundary: 'Conservative: reconstruction connectivity and workshop handling cannot be fully validated automatically, so large retained pieces may still need expert review.',
+  },
+  expertReviewedUsable: {
+    title: 'Expert-Reviewed Usable Recovery',
+    formula: 'Reported by the backend: auto-validated usable + expert-confirmed usable pieces, as % of rough weight',
+    meaning: 'Usable preform recovery after an expert reviews the unresolved retained pieces. Pending, needs-further-separation and expert-unusable pieces add nothing.',
+    boundary: 'An expert judgement on existing physical pieces, not polished gemstone yield.',
+  },
   defectPolicy: {
     title: 'Optimization defect policy',
     meaning: 'Only defects a reviewer has confirmed restrict where the optimizer may place regions and cuts. AI and OpenCV candidates stay advisory until confirmed.',

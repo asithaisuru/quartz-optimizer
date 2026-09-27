@@ -10,6 +10,10 @@ export function resolveBackendResource(path, apiUrl) {
   if (typeof path !== 'string' || !path) return null;
   if (/^https?:\/\//i.test(path)) return path;
   if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\')) return null;
+  // Reject dot segments (raw or percent-encoded) so a path can never be
+  // normalized to a different backend resource than the one it names.
+  const segments = path.split(/[?#]/)[0].split('/');
+  if (segments.some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment))) return null;
   const origin = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
   let base;
   try {
