@@ -1000,3 +1000,198 @@ Reconstruction-lobe proposals complement the preserved neck/PCA/beam search and
 always pass the existing manufacturing verifier before physical partitioning.
 The earlier approximately 99% results based on natural source partitioning are
 superseded and must not be reported as physically valid usable recovery.
+
+
+## Human-in-the-loop Expert Review (schema 1)
+
+Expert review is an additive evidence layer over a completed physical-piece V2
+result. It classifies existing physical leaves; it does not change geometry,
+selected cuts, defects, automatic validation, physical retention or the optimizer
+result. Unresolved retained material is not automatically waste.
+
+Three measurements remain separate:
+1. Physical material retention: immutable optimizer physical ledger.
+2. Auto-validated usable preform recovery: immutable automatic result.
+3. Expert-reviewed / review-adjusted usable preform recovery: auto usable mass plus
+   unresolved retained physical leaves explicitly accepted by the reviewer.
+
+This is never polished yield, and review does not establish a universal workshop
+standard. Reviewer experience and name/code are voluntarily entered provenance,
+not authenticated expert credentials. No automatic rerun follows a decision.
+
+### Physical authority and supported runs
+
+Review supports completed recovery_model_version=v2_usable_preform runs using
+stock_partition_basis=one_original_physical_stock_and_verified_cuts_only.
+The API replays selected verified cuts from the single root, checks unique child
+lineage, matches final graph leaves and physical region metadata, and reconciles
+retained/auto-usable masses to the result. Only final physical leaf IDs are accepted.
+Use the piece_id returned by GET (for example rough_piece_4); never use a region
+ID such as R1, a cut ID, reconstruction component or candidate-lobe ID.
+
+All physical leaves appear in pieces. Retained non-auto-usable leaves have
+review_required=true and decision=pending initially. Auto-usable leaves and
+explicitly physically discarded leaves have review_required=false; this first
+version rejects PATCH decisions on them (409). No expert override of auto usable
+mass or resurrection of discarded physical material is implemented.
+
+Original uncut stock is one physical leaf and may itself be reviewed when it is
+retained and unresolved. Expert acceptance of that entire leaf does not create
+additional physical pieces.
+
+### Exact API endpoints
+
+- GET /jobs/{job_id}/preform-recovery/{run_id}/expert-review
+- PATCH /jobs/{job_id}/preform-recovery/{run_id}/expert-review
+- PATCH /jobs/{job_id}/preform-recovery/{run_id}/expert-review/pieces/{piece_id}
+
+GET initializes the separate evidence file if absent. Both PATCH operations return
+the same full review response as GET; existing optimizer endpoints and metrics
+are unchanged. No frontend modification or additional endpoint is required.
+
+Session PATCH example:
+
+```json
+{
+  "reviewer": {
+    "name": "Voluntary reviewer name or alias",
+    "code": "EXP-01",
+    "experience_years": 15
+  }
+}
+```
+
+Defaults are name="", code=null, experience_years=null. Nested metadata PATCH is
+partial. Experience must be finite and nonnegative; no credential is required.
+Name/code limits are 200/100 characters. Unknown fields are rejected.
+
+Piece PATCH example:
+
+```json
+{
+  "decision": "needs_further_separation",
+  "reason_code": "requires_additional_cut",
+  "notes": "Expert recommends another separation cut."
+}
+```
+
+Decisions:
+- pending: no completed decision; no additional usable credit.
+- usable_preform: reviewer accepts this existing retained physical leaf; adds its
+  full physical weight to expert-confirmed additional usable mass.
+- needs_further_separation: completed expert decision; retained and non-waste,
+  but no usable credit yet. No optimizer is started.
+- waste_unusable: explicit expert classification for this objective; no usable
+  credit. The immutable physical-retention metric still does not change.
+
+Optional reason_code is null or shape_usable, geometry_usable,
+requires_additional_cut, too_small, defect_concern, handling_concern,
+commercially_impractical or other. These are expert-provided labels, not automatic
+scientific findings. Notes are text, maximum 10,000 characters. Omitted reason/notes
+retain prior values. To clear them when resetting, send decision=pending,
+reason_code=null and notes="". A pending reset clears reviewed_at.
+
+### Response and exact calculations
+
+Top-level fields: schema_version, job_id, run_id, reviewer, target_applicable,
+target_recovery_percent, pieces, summary. Additive audit fields: result_sha256,
+current_result_sha256, created_at, updated_at, stale, review_status and stale_reason.
+
+Each piece includes piece_id, parent_piece_id, created_by_cut_id, weight_ct,
+auto_usable, auto_usability_status, morphology, suggested_finish_shapes, mesh_file,
+review_required, decision, reason_code, notes and reviewed_at. physically_retained
+is an additive boolean. Provenance comes from selected cuts, not candidate labels.
+The root has null parent/cut. Browser-safe mesh_file is regenerated from the
+existing local region export as /files/{job}/preform_recovery/{run}/R1.ply.
+Missing/unsafe assets return null; metadata review remains available. Meshes are
+reused rather than duplicated by the review API. Server filesystem paths are
+never copied from stored asset fields into the response.
+
+summary preserves rough_weight_ct, physical_retained_weight_ct,
+physical_retention_percent, auto_validated_usable_weight_ct and
+auto_validated_usable_recovery_percent from the compatible optimizer result.
+
+    additional = sum(review-required physical leaf weight where decision == usable_preform)
+    review_adjusted_usable_weight_ct = auto_validated_usable_weight_ct + additional
+    review_adjusted_usable_recovery_percent = 100 * adjusted_weight / rough_weight_ct
+
+expert_confirmed_additional_usable_weight_ct is additional. The remaining
+review-required weights are bucketed exclusively into pending_review_weight_ct,
+needs_further_separation_weight_ct and expert_unusable_weight_ct. Auto-usable
+pieces are counted once and never require reconfirmation. The sum of auto usable
+and the four review-required buckets equals physical retention.
+
+review_required_count counts unresolved retained leaves; reviewed_count counts
+those with decision other than pending. review_complete means every required leaf
+has a non-pending decision, including needs_further_separation.
+
+target_status follows this exact order:
+1. not_applicable when the result target is defect-constrained.
+2. met when adjusted recovery meets the configured target (even with pending leaves).
+3. pending_review when pending required mass remains.
+4. not_met otherwise.
+
+Thus a fully reviewed current plan can remain not_met because some pieces need
+further separation. The default 85% is an expert-defined practical target for zero
+confirmed fractures/inclusions, not a guaranteed outcome. The existing
+confirmed-only defect policy and target_applicable value are never changed.
+
+### Persistence, staleness and errors
+
+Only jobs/{job_id}/preform_recovery/{run_id}/expert_review.json is written:
+
+```json
+{
+  "schema_version": 1,
+  "job_id": "JOB_ID",
+  "run_id": "RUN_ID",
+  "result_sha256": "SHA256_OF_COMPLETED_RESULT_BYTES",
+  "reviewer": {"name": "", "code": null, "experience_years": null},
+  "piece_reviews": {
+    "rough_piece_4": {
+      "decision": "needs_further_separation",
+      "reason_code": "requires_additional_cut",
+      "notes": "Expert observation",
+      "reviewed_at": "UTC_ISO_TIMESTAMP"
+    }
+  },
+  "created_at": "UTC_ISO_TIMESTAMP",
+  "updated_at": "UTC_ISO_TIMESTAMP"
+}
+```
+
+The existing cross-process job lock serializes updates; existing atomic JSON
+replacement persists evidence. No result.json, analysis_report.json, saved V1/V2
+result, region mesh or defect file is rewritten. Repeated GET preserves timestamps.
+
+A changed result hash makes GET stale=true with review_status=stale. Stored
+decisions remain untouched and are not applied: response pieces use pending
+defaults and summary uses the current immutable auto result. PATCH returns 409.
+An incompatible/corrupt changed graph also returns 409 (422 for an unsupported
+result model). There is no silent rebinding; use a new compatible completed run.
+This first version stores latest decisions and timestamps, not a historical
+revision trail or authenticated electronic signature.
+
+404: missing job/run or unknown/non-leaf piece ID.
+409: incomplete run, stale/corrupt result/review, unsupported override, or busy IO.
+422: invalid payload/decision/reason/metadata or unsupported V1/physical model.
+Errors use generic public messages and do not expose server paths.
+
+### Verification
+
+backend/tests/test_preform_expert_review.py covers initialization, all decisions,
+reset, formula/target ordering, metadata persistence/restart, concurrency, retained
+leaf restrictions, discarded/auto override rejection, staleness, safe/missing
+meshes, invalid data, uncut physical stock and unchanged optimizer/legacy bytes.
+The full existing backend suite still covers V2 mass/defect/legacy behavior.
+
+Run the opt-in real HTTP smoke in quartz:
+
+```powershell
+python -B backend/tests/smoke_preform_expert_review.py
+```
+
+It copies the completed real QZ-05/QZ-01 scratch V2 runs, verifies all review
+calculations and mesh downloads, and hashes optimizer results and original inputs.
+All injected decisions are explicitly SIMULATED TEST ONLY and finally reset to
+pending; they are not real expert evidence or a claim that 85% was achieved.

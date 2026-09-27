@@ -447,4 +447,6 @@ def create_router(validate_job, jobs_root=None):
                                   message="Preform worker exited before completion; start a new run.")
                     record_status(job, job / "preform_recovery" / run_id, status)
 
+    from preform_expert_review import create_router as create_expert_review_router
+    router.include_router(create_expert_review_router(validate_job, job_lock))
     return router
