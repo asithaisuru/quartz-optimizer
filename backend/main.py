@@ -1904,3 +1904,9 @@ async def get_status(job_id: str):
             "job_id": job_id,
             **_pdf_status_fields(job_folder, job_id),
         }
+
+
+# Real FastAPI instances expose router; lightweight legacy test doubles do not.
+if hasattr(app, "router"):
+    from preform_api import create_router as create_preform_router
+    app.include_router(create_preform_router(_validated_job_folder, lambda: JOBS_DIR))
