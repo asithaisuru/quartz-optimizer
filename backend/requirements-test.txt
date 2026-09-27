@@ -1,0 +1,2 @@
+# Additional dependency for HTTP integration tests; install runtime dependencies first.
+httpx==0.28.1
