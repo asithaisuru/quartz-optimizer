@@ -1,9 +1,17 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import ModelViewer from './ModelViewer';
 import MetricHelp from './MetricHelp';
 import ExtendedSearchPanel from './ExtendedSearchPanel';
+import DefectReviewPanel from './DefectReviewPanel';
+import PreformRecoveryPanel from './PreformRecoveryPanel';
+import useDefectReview, { draftGeometry } from '../hooks/useDefectReview';
+import usePreformRecovery from '../hooks/usePreformRecovery';
 import { downloadPdf, resolveBackendUrl } from '../utils/pdfDownload';
+import { validateGeometry } from '../utils/defectReview';
+import { resolveBackendResource } from '../utils/backendUrl';
+import { overlayOffset, viewerMeshFrame } from '../utils/coordinates';
+import { OPTIMIZER_MODES, OPTIMIZER_MODE_LABELS } from '../utils/preformRecovery';
 import {
   Download, Layers, Box, Scale, Edit2, Check, X,
   Loader2, Sparkles, Copy, Hash, FileText, SunDim,
@@ -137,6 +145,11 @@ export default function ResultDashboard({
   // (includes remaining_space_metadata) — null until that panel has
   // fetched something, or if extended search isn't available at all.
   const [extendedSearchStatus, setExtendedSearchStatus] = useState(null);
+  // Viewer mode (Inspect / Defect Review / Cut Sequence) is lifted here so
+  // the sidebar can show the matching Defect Review tools.
+  const [viewerMode, setViewerMode] = useState('inspect');
+  const [optimizerMode, setOptimizerMode] = useState(OPTIMIZER_MODES.LEGACY);
+  const [selectedRegionId, setSelectedRegionId] = useState(null);
 
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
@@ -534,6 +547,53 @@ export default function ResultDashboard({
     url: resultAssetUrl(gem?.file),
   }));
 
+  // --- Defect Review / Preform Recovery ---
+  // Spatial work uses each endpoint's own coordinate_frame, never the
+  // selected legacy option's scale.
+  const isPreformMode = optimizerMode === OPTIMIZER_MODES.PREFORM;
+  const defectReview = useDefectReview({ apiUrl: API_URL, jobId });
+  const canPlaceDefects = Boolean(overlayOffset(viewerMeshFrame(modelUrl), defectReview.frame));
+  const preform = usePreformRecovery({ apiUrl: API_URL, jobId, enabled: isPreformMode });
+  const draftShape = draftGeometry(defectReview.draft);
+  const draftPreview = draftShape && (
+    draftShape.kind === 'ellipsoid'
+      ? validateGeometry(draftShape) === null
+      : draftShape.points_mm.length >= 2 && Number(draftShape.radius_mm) > 0
+  ) ? draftShape : null;
+  // Memoized: the viewer resets its cut-sequence step whenever this
+  // result's identity changes.
+  // mesh_file is backend-root-relative: resolved against the backend base,
+  // never the legacy result asset directory.
+  const viewerPreformResult = useMemo(() => {
+    if (!preform.result) return null;
+    return {
+      ...preform.result,
+      regions: preform.result.regions.map((region) => ({
+        ...region,
+        resolvedUrl: resolveBackendResource(region?.mesh_file, API_URL),
+      })),
+    };
+  }, [preform.result]);
+  const viewerDefectReview = defectReview.availability === 'available' ? {
+    frame: defectReview.frame,
+    candidates: defectReview.review.candidates,
+    annotations: defectReview.review.annotations,
+    showRejected: defectReview.showRejected,
+    selectedId: defectReview.selectedId,
+    onSelect: (id) => defectReview.setSelectedId(
+      (current) => (current === id ? null : id)
+    ),
+    draft: defectReview.draft,
+    draftPreview,
+    onPick: defectReview.handlePick,
+  } : null;
+  const viewerPreform = isPreformMode ? {
+    active: true,
+    result: viewerPreformResult,
+    selectedRegionId,
+    onSelectRegion: setSelectedRegionId,
+  } : null;
+
   return (
     <div className="min-h-screen w-full flex flex-col overflow-auto lg:h-screen lg:flex-row lg:overflow-hidden">
 
@@ -552,6 +612,10 @@ export default function ResultDashboard({
           activeGemCount={gemCount}
           selectedGemIndex={selectedGemIndex}
           onSelectGem={setSelectedGemIndex}
+          viewerMode={viewerMode}
+          onViewerModeChange={setViewerMode}
+          defectReview={viewerDefectReview}
+          preform={viewerPreform}
         />
       </div>
 
@@ -561,7 +625,9 @@ export default function ResultDashboard({
         {/* HEADER */}
         <div className="border-b border-slate-800 pb-4">
           <h2 className="text-2xl font-bold text-white mb-1">Analysis Report</h2>
-          <p className="text-slate-400 text-sm">Automated Yield Estimation</p>
+          <p className="text-slate-400 text-sm">
+            {isPreformMode ? 'Preform Recovery Planning' : 'Automated Yield Estimation'}
+          </p>
           <button
             onClick={handleCopyId}
             className="flex items-center gap-1.5 px-2 py-1 rounded mt-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-all group"
@@ -588,6 +654,17 @@ export default function ResultDashboard({
             <AlertTriangle className="w-4 h-4" />
             {showFractures ? 'Hide Fractures / Clouds' : 'Show Fractures / Clouds'}
           </button>
+        )}
+
+        {/* DEFECT REVIEW — compact outside the Defect Review viewer mode */}
+        {jobId && (
+          <DefectReviewPanel
+            review={defectReview}
+            active={viewerMode === 'defects'}
+            onOpen={() => setViewerMode('defects')}
+            canPlace={canPlaceDefects}
+            apiUrl={API_URL}
+          />
         )}
 
         {/* WEIGHT CARD */}
@@ -773,16 +850,18 @@ export default function ResultDashboard({
                 <span className="text-4xl font-bold text-white">{data?.raw_carats ?? "..."}</span>
                 <span className="text-lg text-slate-400 ml-2">cts</span>
               </div>
-              <button
-                onClick={() => {
-                  setTempWeight(data?.raw_carats);
-                  applyOptimizerSettings(data, selectedOption);
-                  setIsEditing(true);
-                }}
-                className="opacity-0 group-hover:opacity-100 transition-opacity p-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-emerald-400"
-              >
-                <Edit2 className="w-4 h-4" />
-              </button>
+              {!isPreformMode && (
+                <button
+                  onClick={() => {
+                    setTempWeight(data?.raw_carats);
+                    applyOptimizerSettings(data, selectedOption);
+                    setIsEditing(true);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-emerald-400"
+                >
+                  <Edit2 className="w-4 h-4" />
+                </button>
+              )}
             </div>
           )}
 
@@ -792,6 +871,44 @@ export default function ResultDashboard({
           </p>
         </div>
 
+        {/* OPTIMIZER MODE */}
+        <div>
+          <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Optimizer mode
+          </h3>
+          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Optimizer mode">
+            {[OPTIMIZER_MODES.LEGACY, OPTIMIZER_MODES.PREFORM].map((mode) => (
+              <button
+                key={mode} type="button" role="radio"
+                aria-checked={optimizerMode === mode}
+                disabled={isEditing}
+                onClick={() => {
+                  setOptimizerMode(mode);
+                  setSelectedRegionId(null);
+                  setSelectedGemIndex(null);
+                }}
+                className={`min-h-10 rounded-lg border px-2 py-1.5 text-xs font-semibold transition-all disabled:opacity-50 ${
+                  optimizerMode === mode
+                    ? (mode === OPTIMIZER_MODES.PREFORM
+                      ? 'border-cyan-500 bg-cyan-600/20 text-cyan-200'
+                      : 'border-purple-500 bg-purple-600/20 text-purple-200')
+                    : 'border-slate-700 bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >{OPTIMIZER_MODE_LABELS[mode]}</button>
+            ))}
+          </div>
+        </div>
+
+        {isPreformMode && jobId && (
+          <PreformRecoveryPanel
+            preform={preform}
+            review={defectReview}
+            selectedRegionId={selectedRegionId}
+            onSelectRegion={setSelectedRegionId}
+          />
+        )}
+
+        {!isPreformMode && (<>
         {/* OPTIONS LIST */}
         {data?.options?.length > 0 && (
           <div className="space-y-2">
@@ -1154,15 +1271,21 @@ export default function ResultDashboard({
             <p className="text-[10px] text-slate-500 mt-2 text-center">Measurements in mm</p>
           </div>
 
-          {/* Extended search — renders nothing if the backend doesn't
-              support it yet, so this is safe to always mount. */}
-          {jobId && (
+        </div>
+        </>)}
+
+        {/* Extended search — renders nothing if the backend doesn't
+            support it yet, so this is safe to always mount. Kept mounted
+            (hidden) in Preform Recovery mode so a running legacy search
+            keeps reporting status. */}
+        {jobId && (
+          <div className={isPreformMode ? 'hidden' : ''}>
             <ExtendedSearchPanel
               apiUrl={API_URL} jobId={jobId}
               onStatusChange={handleExtendedStatusChange}
             />
-          )}
-        </div>
+          </div>
+        )}
 
         {/* ACTIONS */}
         <div className="mt-auto pt-4 border-t border-slate-800 space-y-3">

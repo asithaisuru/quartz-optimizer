@@ -56,6 +56,27 @@ export const METRIC_EXPLANATIONS = {
     meaning: 'Reflects how well the recommended facet-table orientation keeps visible, mapped defects out of the face-up view.',
     boundary: 'Produced by a machine-learning recommender, or a geometric heuristic when that is unavailable — a planning aid, not a rendered simulation of the polished gem.',
   },
+  preformRecovery: {
+    title: 'Preform recovery %',
+    formula: 'Preform recovery % = (retained preform weight ÷ original rough weight) × 100',
+    meaning: 'Share of the rough kept as usable preform material after planned saw cuts, kerf loss and any confirmed-defect exclusions.',
+    boundary: 'Not polished-gem yield. Preforms still lose material in final faceting and polishing. Not comparable to the legacy faceted-template Yield %.',
+  },
+  retainedPreformWeight: {
+    title: 'Retained preform weight',
+    meaning: 'Combined weight of the preform regions the plan keeps, as reported by the backend.',
+    boundary: 'Weight of shaped preforms before final cutting and polishing, not finished-gem weight.',
+  },
+  expertRecoveryTarget: {
+    title: 'Expert-defined recovery target',
+    meaning: 'A practical target for how much of a defect-free/preform rough should remain useful, set by the consulting gemstone expert. Default 85%, editable.',
+    boundary: 'An expert-defined reference, not a universal gemstone-industry figure or a guaranteed yield. It does not apply as a pass/fail test when confirmed defects constrain the rough.',
+  },
+  defectPolicy: {
+    title: 'Optimization defect policy',
+    meaning: 'Only defects a reviewer has confirmed restrict where the optimizer may place regions and cuts. AI and OpenCV candidates stay advisory until confirmed.',
+    boundary: 'Defect geometry is an approximate safety region around visible evidence, not an exact internal volumetric reconstruction.',
+  },
   defectCount: {
     title: 'Defect count',
     meaning: 'Number of inclusion / fracture points detected in the source footage and successfully mapped into the 3D model as accepted evidence.',
