@@ -122,5 +122,10 @@ describe('resolveBackendResource', () => {
     expect(resolveBackendResource('//evil.example/x', 'http://b')).toBeNull();
     expect(resolveBackendResource('R1.ply', 'http://b')).toBeNull();
     expect(resolveBackendResource('/../x', 'http://b/api')).toBeNull();
+    expect(resolveBackendResource('/files/../../secret.ply', 'http://b')).toBeNull();
+    expect(resolveBackendResource('/files/%2e%2e/secret.ply', 'http://b')).toBeNull();
+    expect(resolveBackendResource('/files/./R1.ply', 'http://b')).toBeNull();
+    expect(resolveBackendResource('/files/J/preform_recovery/RUN/R1..v2.ply', 'http://b'))
+      .toBe('http://b/files/J/preform_recovery/RUN/R1..v2.ply');
   });
 });

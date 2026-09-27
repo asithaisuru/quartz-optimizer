@@ -11,6 +11,9 @@ import MetricHelp from './MetricHelp';
 import PreformRegionDetails from './PreformRegionDetails';
 import { VISUAL_STATES, itemId, readGeometry, readSparsePoints, visualStateOf } from '../utils/defectReview';
 import { cutPlaneCentered, regionColor } from '../utils/preformRecovery';
+import { PIECE_STATES } from '../utils/expertReview';
+
+const EXPERT_LEGEND = ['auto_usable', 'pending', 'usable_preform', 'needs_further_separation', 'waste_unusable'];
 import {
   BACKEND_TO_VIEWER_ROTATION, overlayOffset, pickedLocalToMm, viewerMeshFrame,
 } from '../utils/coordinates';
@@ -603,6 +606,9 @@ export default function ModelViewer({
   defectReview = null,
   // Optional Preform Recovery overlay state (see ResultDashboard).
   preform = null,
+  // Optional Expert Review state: backend physical leaf pieces (with a
+  // safely resolved mesh URL and review state) plus the run's frame.
+  expertReview = null,
 }) {
   const [internalMode, setInternalMode] = useState('inspect');
   const requestedMode = controlledMode ?? internalMode;
@@ -623,6 +629,7 @@ export default function ModelViewer({
   const resultFrame = preformResult?.frame || null;
   const defectOffset = overlayOffset(meshFrame, reviewFrame);
   const preformOffset = overlayOffset(meshFrame, resultFrame);
+  const expertOffset = overlayOffset(meshFrame, expertReview?.frame || null);
 
   // In Preform Recovery mode the Cut Sequence steps through the result's
   // selected_verified cuts only (already ordered by `sequence`).
@@ -667,8 +674,12 @@ export default function ModelViewer({
   const [roughRadius, setRoughRadius] = useState(0);
 
   const defectMode = viewerMode === 'defects';
+  const expertMode = viewerMode === 'expert';
   const sequenceMode = viewerMode === 'sequence' && canInspectSequence;
-  const inspectMode = !defectMode && !sequenceMode;
+  const inspectMode = !defectMode && !sequenceMode && !expertMode;
+  const expertPieces = expertMode && expertOffset && Array.isArray(expertReview?.pieces)
+    ? expertReview.pieces.filter((piece) => piece.resolvedUrl)
+    : [];
   const legacyInspect = inspectMode && !preformActive;
   const activeStep = sequence[stepIndex] || null;
   const preformMargin = Number(manufacturingPlan?.settings?.preform_margin_mm) || 0;
@@ -755,10 +766,30 @@ export default function ModelViewer({
       <div className="absolute top-4 left-4 z-20 flex max-w-[calc(100%-5.5rem)] overflow-x-auto bg-slate-900/90 p-1 border border-slate-700 rounded-lg">
         {modeButton('inspect', 'Inspect', 'bg-cyan-600 text-white')}
         {modeButton('defects', 'Defect Review', 'bg-red-600 text-white')}
+        {modeButton('expert', 'Expert Review', 'bg-emerald-600 text-white')}
         {modeButton('sequence', 'Cut Sequence', 'bg-amber-500 text-slate-950', canInspectSequence)}
       </div>
 
-      {!defectMode && showingLabel && (
+      {expertMode && (
+        <div className="absolute top-16 left-4 z-20 max-w-[calc(100%-5.5rem)] rounded-lg border border-slate-700 bg-slate-950/90 p-2 text-[10px] leading-4 text-slate-300 sm:w-64 sm:p-2.5">
+          <div className="mb-1 hidden font-semibold text-white sm:block">Expert Review · physical pieces</div>
+          <ul className="flex flex-wrap gap-x-2.5 gap-y-0.5 sm:block sm:space-y-0.5">
+            {EXPERT_LEGEND.map((state) => (
+              <li key={state} className="flex items-center gap-1.5">
+                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: PIECE_STATES[state].color }} aria-hidden="true" />
+                <span className="min-w-0 break-words">{PIECE_STATES[state].label}</span>
+              </li>
+            ))}
+          </ul>
+          {!expertReview?.pieces?.length ? (
+            <p className="mt-1 text-slate-500">No reviewable physical pieces loaded.</p>
+          ) : !expertOffset ? (
+            <p className="mt-1 text-amber-300">Piece geometry cannot be placed: the run's coordinate frame does not match this viewer mesh.</p>
+          ) : null}
+        </div>
+      )}
+
+      {!defectMode && !expertMode && showingLabel && (
         <div
           className="absolute top-16 left-4 z-20 max-w-[calc(100%-5.5rem)] break-words bg-slate-900/90 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px] text-slate-300"
           title="The plan currently rendered here always matches the sidebar's selection."
@@ -961,6 +992,7 @@ export default function ModelViewer({
         onPointerMissed={() => {
           if (legacyInspect) onSelectGem(null);
           if (inspectMode && preformActive) preform.onSelectRegion(null);
+          if (expertMode && expertReview) expertReview.onSelectPiece(null);
         }}
       >
         <Suspense fallback={null}>
@@ -971,11 +1003,33 @@ export default function ModelViewer({
             <group rotation={BACKEND_TO_VIEWER}>
               <RoughStone
                 url={modelUrl}
-                isXRay={defectMode || (inspectMode && preformActive) || (showCut && cutUrl && isXRay)}
+                isXRay={defectMode || expertMode || (inspectMode && preformActive) || (showCut && cutUrl && isXRay)}
                 showWireframe={showWireframe} sequenceMode={sequenceMode}
                 onPick={pickingActive ? handleRoughPick : undefined}
                 onBounds={setRoughRadius}
               />
+              {/* Expert Review: backend physical leaf meshes (already centered), offset once. */}
+              {expertPieces.length > 0 && (
+                <group position={expertOffset}>
+                  {expertPieces.map((piece) => {
+                    const selected = expertReview.selectedPieceId === piece.piece_id;
+                    return (
+                      <SafeLoad key={piece.piece_id}>
+                        <Suspense fallback={null}>
+                          <RegionMesh
+                            url={piece.resolvedUrl}
+                            color={PIECE_STATES[piece.state]?.color ?? '#64748b'}
+                            selected={selected}
+                            muted={piece.state === 'waste_unusable' || piece.state === 'not_review_required'
+                              || (expertReview.selectedPieceId != null && !selected)}
+                            onSelect={() => expertReview.onSelectPiece(selected ? null : piece.piece_id)}
+                          />
+                        </Suspense>
+                      </SafeLoad>
+                    );
+                  })}
+                </group>
+              )}
               {legacyInspect && showCut && (
                 hasIndividualGems ? (
                   inspectableGems.map((gem) => (

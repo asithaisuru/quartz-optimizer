@@ -66,5 +66,22 @@ export const startPreformRecovery = (apiUrl, jobId, body) =>
 export const fetchPreformStatus = (apiUrl, jobId) =>
   axios.get(`${base(apiUrl, jobId)}/preform-recovery/status`).then(unwrap);
 
+// Expert Review of a completed V2 run's physical leaf pieces:
+//   GET   /jobs/{id}/preform-recovery/{run_id}/expert-review
+//   PATCH /jobs/{id}/preform-recovery/{run_id}/expert-review            {reviewer}
+//   PATCH /jobs/{id}/preform-recovery/{run_id}/expert-review/pieces/{piece_id}
+// Both PATCHes return the full, recomputed review (backend-authoritative).
+const expertBase = (apiUrl, jobId, runId) =>
+  `${base(apiUrl, jobId)}/preform-recovery/${encodeURIComponent(runId)}/expert-review`;
+
+export const fetchExpertReview = (apiUrl, jobId, runId) =>
+  axios.get(expertBase(apiUrl, jobId, runId)).then(unwrap);
+
+export const patchExpertReviewer = (apiUrl, jobId, runId, reviewer) =>
+  axios.patch(expertBase(apiUrl, jobId, runId), { reviewer }).then(unwrap);
+
+export const patchExpertPiece = (apiUrl, jobId, runId, pieceId, body) =>
+  axios.patch(`${expertBase(apiUrl, jobId, runId)}/pieces/${encodeURIComponent(pieceId)}`, body).then(unwrap);
+
 export const fetchPreformResult = (apiUrl, jobId) =>
   axios.get(`${base(apiUrl, jobId)}/preform-recovery/result`).then(unwrap);

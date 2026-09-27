@@ -7,6 +7,9 @@ import DefectReviewPanel from './DefectReviewPanel';
 import PreformRecoveryPanel from './PreformRecoveryPanel';
 import useDefectReview, { draftGeometry } from '../hooks/useDefectReview';
 import usePreformRecovery from '../hooks/usePreformRecovery';
+import useExpertReview from '../hooks/useExpertReview';
+import ExpertReviewPanel from './ExpertReviewPanel';
+import { expertReviewEligibility, pieceState } from '../utils/expertReview';
 import { downloadPdf, resolveBackendUrl } from '../utils/pdfDownload';
 import { validateGeometry } from '../utils/defectReview';
 import { resolveBackendResource } from '../utils/backendUrl';
@@ -150,6 +153,7 @@ export default function ResultDashboard({
   const [viewerMode, setViewerMode] = useState('inspect');
   const [optimizerMode, setOptimizerMode] = useState(OPTIMIZER_MODES.LEGACY);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
+  const [selectedPieceId, setSelectedPieceId] = useState(null);
 
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
@@ -553,7 +557,25 @@ export default function ResultDashboard({
   const isPreformMode = optimizerMode === OPTIMIZER_MODES.PREFORM;
   const defectReview = useDefectReview({ apiUrl: API_URL, jobId });
   const canPlaceDefects = Boolean(overlayOffset(viewerMeshFrame(modelUrl), defectReview.frame));
-  const preform = usePreformRecovery({ apiUrl: API_URL, jobId, enabled: isPreformMode });
+  const isExpertMode = viewerMode === 'expert';
+  // The Expert Review tab needs the preform result to decide eligibility.
+  const preform = usePreformRecovery({ apiUrl: API_URL, jobId, enabled: isPreformMode || isExpertMode });
+  const expertEligibility = expertReviewEligibility({ phase: preform.phase, resultView: preform.result });
+  const expert = useExpertReview({
+    apiUrl: API_URL, jobId, runId: expertEligibility.runId, enabled: isExpertMode && expertEligibility.eligible,
+  });
+  // Backend piece list + safely resolved mesh URLs (null mesh_file → list only).
+  const viewerExpertPieces = useMemo(() => (expert.review?.pieces || []).map((piece) => ({
+    piece_id: piece.piece_id,
+    state: pieceState(piece),
+    resolvedUrl: resolveBackendResource(piece.mesh_file, API_URL),
+  })), [expert.review]);
+  const viewerExpert = isExpertMode ? {
+    pieces: viewerExpertPieces,
+    selectedPieceId,
+    onSelectPiece: setSelectedPieceId,
+    frame: preform.result?.frame ?? null,
+  } : null;
   const draftShape = draftGeometry(defectReview.draft);
   const draftPreview = draftShape && (
     draftShape.kind === 'ellipsoid'
@@ -616,6 +638,7 @@ export default function ResultDashboard({
           onViewerModeChange={setViewerMode}
           defectReview={viewerDefectReview}
           preform={viewerPreform}
+          expertReview={viewerExpert}
         />
       </div>
 
@@ -664,6 +687,22 @@ export default function ResultDashboard({
             onOpen={() => setViewerMode('defects')}
             canPlace={canPlaceDefects}
             apiUrl={API_URL}
+          />
+        )}
+
+        {/* EXPERT REVIEW — shown in the Expert Review viewer mode */}
+        {jobId && isExpertMode && (
+          <ExpertReviewPanel
+            eligibility={
+              preform.availability === 'unavailable'
+                ? { eligible: false, reason: 'Expert Review is available for Preform Recovery V2 results.' }
+                : preform.availability === 'unknown'
+                  ? { eligible: false, reason: 'Checking for a completed Preform Recovery result…' }
+                  : expertEligibility
+            }
+            expert={expert}
+            selectedPieceId={selectedPieceId}
+            onSelectPiece={setSelectedPieceId}
           />
         )}
 
