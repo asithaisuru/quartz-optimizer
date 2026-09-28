@@ -5,6 +5,11 @@ faceted or polished gemstone yield. It is the default dashboard workflow; legacy
 faceted optimization, defect-aware faceted optimization, Preform Recovery V2 and
 its Expert Review remain available separately.
 
+The preservation plan now has a pending-only target close-out phase. See
+[target close-out validation](STONE_PRESERVATION_CLOSEOUT.md) for its algorithm,
+separate budget and the updated QZ-05 result. The real-run table below records
+the original baseline before close-out was added.
+
 ## Accounting and objective
 
 Let R be measured rough weight, D the union of confirmed defect safety exclusions,
@@ -36,9 +41,11 @@ The search ranks verified candidates by saved clean mass, manufacturing validity
 lower kerf, lower discard and fewer cuts. Morphology remains advisory; gem count
 does not improve a score. One original stock becomes physical children only
 through verified cuts. Existing ellipsoid tangent/slab and recursive defect
-isolation candidates are reused. Search is bounded to 60 seconds (cooperative;
+isolation candidates are reused. The normal phase is bounded to 60 seconds (cooperative;
 an in-flight verification/export can exceed that), 60 candidates and at most 12
-physical leaves by default. No cuts are generated merely to split clean stock.
+physical leaves by default. Close-out has a separate 120-second budget and at most
+12 additional cuts; it stops as soon as verified saved mass reaches the target.
+No cuts are generated merely to split clean stock.
 
 ## API and viewer
 
@@ -169,13 +176,13 @@ Changed production files:
 No reconstruction, sparse thread configuration, historical job or frozen evidence
 was changed. Changes remain uncommitted in the isolated worktree.
 
-Final verification: **542 backend tests and 7 subtests passed** in 267.88 seconds
+Initial workflow verification: **542 backend tests and 7 subtests passed** in 267.88 seconds
 (7 warnings); **148 frontend tests passed** across 13 files; production Vite build
 passed. The build retains existing missing `/src/style.css` and large-bundle
 warnings. `git diff --check` passed. Browser behavior is covered by component and
 viewer-prop tests; no live WebGL/browser visual review was performed.
 
-Assessment: **SAFE within the existing geometric model**. The expert's 85% target
-is pending; the implementation does not claim that it was achieved. Pending stock
+Initial workflow assessment: **SAFE within the existing geometric model**. The expert's 85% target
+was pending before close-out. Pending stock
 is retained and excluded from saved-clean credit. Deployment/merge and physical
 workshop validation are separate from this uncommitted worktree validation.

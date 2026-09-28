@@ -43,6 +43,10 @@ def main():
     assert result["mass_balance_valid"]
     if result["cuts"]:
         assert result["manufacturing_plan"]["diagnostics"]["exact_sequence_verified"]
+    region_ids = {r["region_id"] for r in result["regions"]}
+    for cut in result["cuts"]:
+        assert set(cut["region_ids"]) <= region_ids
+    assert result["closeout_termination_reason"] == result["diagnostics"]["closeout_termination_reason"]
     for region in result["regions"]:
         prefix = f"/files/{dest.name}/stone_preservation/{run_id}/"
         assert region["mesh_file"].startswith(prefix)
@@ -60,6 +64,8 @@ def main():
                   source_hashes_unchanged=True, source_hashes=before,
                   termination_reason=result["diagnostics"]["termination_reason"],
                   performance=result["diagnostics"]["performance"])
+    output["closeout"] = {key: value for key, value in result["diagnostics"].items()
+                          if "closeout" in key or key == "target_weight_ct"}
     atomic_json(dest/"stone_preservation"/run_id/"validation.json", output)
     print(json.dumps(output, indent=2))
 
