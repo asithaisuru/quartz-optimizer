@@ -101,6 +101,10 @@ class FitContext:
     rough_mask: np.ndarray
     no_cut_mask: np.ndarray
     fit: dict
+    confirmed_guard: object = None
+    candidate_deadline: float = None
+    timings: dict = None
+    performance: dict = None
 
 
 @dataclass
@@ -580,7 +584,12 @@ def _stricten_placement(placement, ctx, occupied=None):
     if np.any(~_flat_mask_values(ctx.rough_mask, flat)):
         return None, "dense_rough_voxel"
     if np.any(_flat_mask_values(ctx.no_cut_mask, flat)):
+        if ctx.confirmed_guard is not None:
+            ctx.confirmed_guard.rejected += 1
         return None, "dense_defect_zone"
+    if (ctx.confirmed_guard is not None and ctx.confirmed_guard.rejects(
+            placement.variant.verts * placement.scale + placement.pos)):
+        return None, "confirmed_defect_volume"
 
     spacing_voxels = _spacing_voxels(ctx)
     collision_set = _inflate_flat(flat, ctx.grid.shape, spacing_voxels)
@@ -613,7 +622,11 @@ def _candidate_fit(variant, pos, scale, ctx, occupied=None):
     if np.any(~_flat_mask_values(ctx.rough_mask, flat)):
         return None, "rough_voxel", sdf_min
     if np.any(_flat_mask_values(ctx.no_cut_mask, flat)):
+        if ctx.confirmed_guard is not None:
+            ctx.confirmed_guard.rejected += 1
         return None, "defect_zone", sdf_min
+    if ctx.confirmed_guard is not None and ctx.confirmed_guard.rejects(variant.verts * scale + pos):
+        return None, "confirmed_defect_volume", sdf_min
     if occupied and not occupied.isdisjoint(set(flat.tolist())):
         return None, "overlap", sdf_min
     return flat, "ok", sdf_min
@@ -728,16 +741,28 @@ def _generate_candidates(rough, shapes, search_points, ctx, preferred_shape=None
     variants = _make_variants(active)
     rough_bounds = rough.bounds
     max_dim = float(np.max(rough.extents))
+    if ctx.performance is not None:
+        from optimizer_parallel import evaluate_candidates
+        result = evaluate_candidates(variants, search_points, ctx, rough_bounds,
+                                     max_dim, ctx.performance, progress_callback)
+        if result is not None:
+            return result
     rejected = {}
     candidates = []
 
     total = max(len(variants), 1)
     for i, variant in enumerate(variants):
+        if ctx.candidate_deadline is not None and time.time() >= ctx.candidate_deadline:
+            ctx.confirmed_guard.search_limited = True
+            break
         if progress_callback and i % max(1, total // 20) == 0:
             progress_callback(i, total, "Voxel nesting placements")
 
         local = []
         for pos in search_points:
+            if ctx.candidate_deadline is not None and time.time() >= ctx.candidate_deadline:
+                ctx.confirmed_guard.search_limited = True
+                break
             placement, reason = _max_scale_for(variant, pos, rough_bounds, max_dim, ctx)
             if placement is None:
                 rejected[reason] = rejected.get(reason, 0) + 1
@@ -1839,6 +1864,7 @@ def _plan_or_reduce_state(state, rough, ctx, defect_points, deadline,
         if remaining <= 0.15:
             break
         planned_state = _state_from_placements(ordered)
+        verification_started = time.perf_counter()
         latest_plan = plan_cut_sequence(
             rough,
             [_mesh_from_placement(placement) for placement in ordered],
@@ -1854,6 +1880,8 @@ def _plan_or_reduce_state(state, rough, ctx, defect_points, deadline,
             time_limit_seconds=min(6.0, max(0.1, remaining)),
             preferred_normals=preferred_normals,
         )
+        if ctx.timings is not None:
+            ctx.timings["manufacturing_seconds"] = ctx.timings.get("manufacturing_seconds", 0) + time.perf_counter() - verification_started
         if latest_plan.get("status") == "complete":
             latest_plan["removed_for_cutability"] = dropped
             latest_plan["unconstrained_volume_mesh_units"] = round(
@@ -1972,7 +2000,7 @@ def _leaf_submesh(rough, constraints):
 
 def _best_extra_placement_in_leaf(submesh, existing_placement, shapes,
                                   fit, defect_points, preferred_shape,
-                                  deadline, diag):
+                                  deadline, diag, confirmed_guard=None):
     if submesh.volume <= 0 or float(np.min(submesh.extents)) <= 0:
         diag["leaves_skipped_geometry"] += 1
         return None
@@ -2003,8 +2031,12 @@ def _best_extra_placement_in_leaf(submesh, existing_placement, shapes,
         sub_grid.shape, sub_origin, sub_pitch,
         defect_points, sub_fit["fracture_safe_dist"],
     )
+    if confirmed_guard is not None:
+        sub_no_cut_mask = confirmed_guard.mask(sub_grid.shape, sub_origin, sub_pitch)
     sub_ctx = FitContext(
         sub_grid, sub_origin, sub_pitch, sub_rough_mask, sub_no_cut_mask, sub_fit,
+        confirmed_guard=confirmed_guard,
+        candidate_deadline=deadline if confirmed_guard is not None else None,
     )
 
     existing_dense = _candidate_dense_occ(
@@ -2111,6 +2143,7 @@ def _repack_leaf_pieces(state, plan, rough, ctx, shapes, defect_points,
         found = _best_extra_placement_in_leaf(
             submesh, existing, shapes, ctx.fit, defect_points,
             leaf_shape, leaf_deadline, diag,
+            **({"confirmed_guard": ctx.confirmed_guard} if getattr(ctx, "confirmed_guard", None) is not None else {}),
         )
         if found is None:
             continue
@@ -2475,6 +2508,7 @@ def _strategy_from_state(label, shape_label, state, rough, ctx, base_diag,
                 "scale": round(float(p.scale), 5),
                 "volume": round(float(p.volume), 6),
                 "surface_clearance": round(float(p.surface_clearance), 6),
+                **({"orientation": p.variant.rot.tolist()} if ctx.confirmed_guard is not None else {}),
             }
             for p in state.placements
         ],
@@ -2621,7 +2655,8 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
                  carats_per_mesh_volume=None,
                  extra_gem_policy=DEFAULT_EXTRA_GEM_POLICY,
                  max_gems=MAX_GEMS, preform_margin_mm=None,
-                 max_cut_depth_mm=None, search_budget_multiplier=1.0):
+                 max_cut_depth_mm=None, search_budget_multiplier=1.0,
+                 confirmed_guard=None, geometry_base=None, timings=None, performance=None):
     preferred_shape = _normalize_preferred_shape(preferred_shape)
     print(f"--- Optimizer | mode={mode} | shape={preferred_shape or 'auto'} ---")
     t0 = time.time()
@@ -2630,7 +2665,8 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
     )
 
     try:
-        rough = _as_mesh(trimesh.load(rough_mesh_path))
+        rough = (geometry_base[0].copy() if geometry_base is not None
+                 else _as_mesh(trimesh.load(rough_mesh_path)))
     except Exception as e:
         print(f"   Could not load rough mesh: {e}")
         return []
@@ -2655,8 +2691,10 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
     if not shapes:
         return []
 
-    fpts = _load_fracture_points(job_folder)
-    grid, origin, pitch = _build_sdf_grid(rough)
+    # In the explicit confirmed-only mode, legacy detector clouds are not
+    # optimization constraints. Cuts may pass through defect-bearing offcuts.
+    fpts = np.empty((0, 3)) if confirmed_guard is not None else _load_fracture_points(job_folder)
+    grid, origin, pitch = geometry_base[1:] if geometry_base is not None else _build_sdf_grid(rough)
     max_gems = int(max(1, max_gems or MAX_GEMS))
     fit = _fit_settings(
         extents,
@@ -2675,7 +2713,12 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
     rough_mask = grid > -fit["voxel_tolerance"]
     no_cut_mask = _make_no_cut_mask(grid.shape, origin, pitch, fpts,
                                     fit["fracture_safe_dist"])
-    ctx = FitContext(grid, origin, pitch, rough_mask, no_cut_mask, fit)
+    if confirmed_guard is not None:
+        no_cut_mask = confirmed_guard.mask(grid.shape, origin, pitch)
+    ctx = FitContext(grid, origin, pitch, rough_mask, no_cut_mask, fit,
+                     confirmed_guard=confirmed_guard,
+                     candidate_deadline=t0+40 if confirmed_guard is not None else None,
+                     timings=timings, performance=performance)
 
     usable_volume = float(np.count_nonzero(rough_mask & ~no_cut_mask) * pitch ** 3)
     no_cut_volume = float(np.count_nonzero(no_cut_mask & rough_mask) * pitch ** 3)
@@ -2705,12 +2748,16 @@ def optimize_cut(rough_mesh_path, mode="multi", preferred_shape=None,
         progress_callback=progress_callback,
     )
     base_diag["candidate_count"] = len(candidates)
+    if performance is not None:
+        performance["candidate_count"] = len(candidates)
     base_diag["rejected_candidates"] = rejected
     print(f"   Candidate placements: {len(candidates)}")
 
     settings_present = _cuttable_settings_present(ctx)
     if not candidates:
-        strategies = [_fallback_strategy(rough, shapes, preferred_shape, ctx, base_diag)]
+        # An untested fallback primitive is forbidden in confirmed-only mode.
+        strategies = ([] if confirmed_guard is not None else
+                      [_fallback_strategy(rough, shapes, preferred_shape, ctx, base_diag)])
     else:
         best_single = max(candidates, key=lambda p: p.volume)
         single_state = _refine_state(BeamState(

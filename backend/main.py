@@ -995,7 +995,8 @@ def process_full_pipeline(
     known_weight: str = None,
     preferred_shape: str = None,
     cut_mode: str = "multi",
-    optimizer_settings: dict = None
+    optimizer_settings: dict = None,
+    defer_optimization_until_defect_review: bool = False,
 ):
     ensure_progress(job_folder)
     try:
@@ -1194,6 +1195,15 @@ def process_full_pipeline(
             "Reconstruction, mesh preparation, and 3D evidence mapping completed.",
         )
 
+        if defer_optimization_until_defect_review:
+            from defect_review import atomic_json, review
+            atomic_json(Path(job_folder) / "defect_review_preparation.json", review(Path(job_folder)))
+            update_job_status(
+                job_folder, "Defect Review", 85,
+                "Reconstruction is ready. Review defects, then calculate gems and the cut sequence.",
+                status="awaiting_defect_review")
+            return
+
         # ----------------------------------------------------------------
         # Phase 5 — Yield & cut optimisation (always re-runs so params take effect)
         # ----------------------------------------------------------------
@@ -1388,7 +1398,8 @@ async def create_job(
     max_cut_depth_mm: str = Form(None),
     max_gems: str = Form(None),
     min_secondary_carat: str = Form(None),
-    extra_gem_policy: str = Form(None)
+    extra_gem_policy: str = Form(None),
+    defer_optimization_until_defect_review: bool = Form(False),
 ):
     specimen_id = _required_metadata_text(specimen_id, "Specimen ID")
     source_folder = _required_metadata_text(source_folder, "Source folder")
@@ -1494,13 +1505,16 @@ async def create_job(
         "preferred_shape": preferred_shape,
         "cut_mode":        cut_mode,
         "optimizer_settings": optimizer_settings,
+        "defer_optimization_until_defect_review": defer_optimization_until_defect_review,
     }
     _atomic_write_json(os.path.join(job_folder, "job_config.json"), config)
 
     bg_tasks.add_task(
         process_full_pipeline,
         job_id, job_folder, is_video, scan_mode,
-        known_weight, preferred_shape, cut_mode, optimizer_settings
+        known_weight, preferred_shape, cut_mode, optimizer_settings,
+        **({"defer_optimization_until_defect_review": True}
+             if defer_optimization_until_defect_review else {})
     )
     return {"job_id": job_id, "status_url": f"/jobs/{job_id}/status"}
 
@@ -1540,7 +1554,9 @@ async def resume_job(job_id: str, bg_tasks: BackgroundTasks):
         config.get("known_weight"),
         config.get("preferred_shape"),
         config.get("cut_mode", "multi"),
-        config.get("optimizer_settings")
+        config.get("optimizer_settings"),
+        **({"defer_optimization_until_defect_review": True}
+           if config.get("defer_optimization_until_defect_review", False) else {})
     )
     return {"status": "Resuming", "job_id": job_id}
 
@@ -1862,6 +1878,11 @@ async def get_status(job_id: str):
                 data["defects_url"] = (
                     f"{base_url}/{job_id}/dense/defects.ply?t={ts}")
 
+        if data["status"] == "awaiting_defect_review":
+            data["model_url"] = f"{API_BASE_URL}/files/{job_id}/dense/final_textured_model.ply"
+            data["defect_review_url"] = f"/jobs/{job_id}/defect-review"
+            data["defect_aware_optimization_url"] = f"/jobs/{job_id}/defect-aware-optimization"
+
         # Always expose the job_id so the frontend can offer a Resume button
         data["job_id"] = job_id
         quality_path = os.path.join(job_folder, RECONSTRUCTION_QUALITY_FILENAME)
@@ -1886,3 +1907,5 @@ async def get_status(job_id: str):
 if hasattr(app, "router"):
     from preform_api import create_router as create_preform_router
     app.include_router(create_preform_router(_validated_job_folder, lambda: JOBS_DIR))
+    from defect_aware_api import create_router as create_defect_aware_router
+    app.include_router(create_defect_aware_router(_validated_job_folder))
