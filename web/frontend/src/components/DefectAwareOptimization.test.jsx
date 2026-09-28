@@ -14,7 +14,7 @@ vi.mock('./ModelViewer', () => ({
 
 const { default: Dashboard } = await import('./ResultDashboard');
 // Faceted optimization remains an explicitly selected comparison workflow.
-const ResultDashboard = (props) => <Dashboard initialOptimizerMode="legacy_faceted_pack" {...props} />;
+const ResultDashboard = (props) => <Dashboard initialOptimizerMode="legacy_faceted_pack" presentationMode={false} {...props} />;
 
 const FRAME = { mm_per_mesh_unit: 20, canonical_to_centered_translation_mesh_units: [0, 0, 0] };
 const inclusion = (status, center = [1, 2, 3]) => ({

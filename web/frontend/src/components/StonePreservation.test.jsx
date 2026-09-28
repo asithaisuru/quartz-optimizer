@@ -40,7 +40,7 @@ it('defaults to preservation, reuses reconstruction and sends physical regions/c
     'GET /jobs/job1/stone-preservation/run/status': { run_id: 'run', status: 'completed' },
     'GET /jobs/job1/stone-preservation/run/result': result,
   });
-  render(<ResultDashboard jobId="job1" modelUrl="http://localhost:8000/files/job1/dense/final_textured_model.ply" awaitingDefectReview />);
+  render(<ResultDashboard presentationMode={false} jobId="job1" modelUrl="http://localhost:8000/files/job1/dense/final_textured_model.ply" awaitingDefectReview />);
   const button = await screen.findByRole('button', { name: 'Calculate Stone Preservation' });
   await waitFor(() => expect(button.disabled).toBe(false));
   fireEvent.click(button);

@@ -4,18 +4,10 @@ import {
 } from 'lucide-react';
 import {
   CALCULATE_LABEL, DEFECT_AWARE_DEFAULTS, NO_PLAN_MESSAGE, RECALCULATE_LABEL, REUSED_DONE_LABEL, REUSED_LABEL, RUNNING_LABEL,
-  STALE_MESSAGE, formatElapsed, formatRuntime, isActiveRun, isEmptyPlan, preRunDefectMessage, resultDefectMessage,
+  SETTING_FIELDS, STALE_MESSAGE, formatElapsed, formatRuntime, isActiveRun, isEmptyPlan, preRunDefectMessage,
+  resultDefectMessage,
 } from '../utils/defectAwareOptimization';
 import { formatCt, formatPercent, numberOrNull, prettify } from '../utils/preformRecovery';
-
-const SETTING_FIELDS = [
-  ['bladeKerfMm', 'Blade gap', 'blade_kerf_mm', { min: 0.1, max: 2, step: 0.1 }],
-  ['preformMm', 'Preform', 'preform_mm', { min: 0.01, max: 5, step: 0.1 }],
-  ['roughInsetMm', 'Inset', 'rough_inset_mm', { min: 0.1, max: 5, step: 0.1 }],
-  ['maxCutDepthMm', 'Max depth', 'max_cut_depth_mm', { min: 1, max: 500, step: 1 }],
-  ['maxGems', 'Max gems', 'max_gems', { min: 1, max: 20, step: 1 }],
-  ['minGemCarat', 'Min Ct', 'min_secondary_carat', { min: 0.1, max: 10, step: 0.1 }],
-];
 
 function Stat({ label, value, emphasis }) {
   return (

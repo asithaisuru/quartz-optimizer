@@ -19,6 +19,16 @@ export const DEFECT_AWARE_DEFAULTS = {
   min_secondary_carat: 0.5,
 };
 
+// Editable request fields: [settings key, label, backend field, input limits].
+export const SETTING_FIELDS = [
+  ['bladeKerfMm', 'Blade gap', 'blade_kerf_mm', { min: 0.1, max: 2, step: 0.1 }],
+  ['preformMm', 'Preform', 'preform_mm', { min: 0.01, max: 5, step: 0.1 }],
+  ['roughInsetMm', 'Inset', 'rough_inset_mm', { min: 0.1, max: 5, step: 0.1 }],
+  ['maxCutDepthMm', 'Max depth', 'max_cut_depth_mm', { min: 1, max: 500, step: 1 }],
+  ['maxGems', 'Max gems', 'max_gems', { min: 1, max: 20, step: 1 }],
+  ['minGemCarat', 'Min Ct', 'min_secondary_carat', { min: 0.1, max: 10, step: 0.1 }],
+];
+
 export const RUN_STATUSES = ['queued', 'running', 'completed', 'failed'];
 
 export const isActiveRun = (phase) => phase === 'starting' || phase === 'queued' || phase === 'running';
@@ -54,6 +64,48 @@ export const STALE_MESSAGE =
   'Confirmed defects changed. Gem placement and cut sequence need recalculation.';
 export const CUT_SEQUENCE_LABEL = 'Cut sequence for defect-aware placement';
 export const NO_PLAN_MESSAGE = 'No valid defect-safe gemstone plan was found.';
+
+// Presentation-mode wording for the same defect-aware run ("final gemstones").
+export const FINAL_CALCULATE_LABEL = 'Calculate Final Gemstones';
+export const FINAL_RECALCULATE_LABEL = 'Recalculate Final Gemstones';
+export const FINAL_EMPTY_MESSAGE = 'No final gemstone calculation yet.';
+export const FINAL_STALE_MESSAGE = 'Confirmed defects changed.';
+export const FINAL_STALE_ACTION = 'Recalculate gemstone placement.';
+export const FINAL_CUT_SEQUENCE_LABEL = 'Cut sequence for final gemstone placement';
+export const FINAL_PLACEMENT_LABEL = 'Final gemstone placement';
+
+// Display summary of one defect-aware result. Every value is the backend's
+// own number except the clean-basis pair, which only re-expresses them:
+//   clean rough weight = rough weight − confirmed defect exclusion
+//   final faceted yield = total gem weight ÷ clean rough weight × 100
+// (the backend's faceted_yield_percent is on the full rough weight and is
+// kept as roughYieldPercent).
+export function finalGemstoneSummary(result) {
+  if (!result) return null;
+  const rough = num(result.rough_weight_ct);
+  const excluded = num(result.confirmed_defect_excluded_ct);
+  const total = num(result.total_gem_weight_ct);
+  const clean = rough !== null && excluded !== null && rough - excluded > 0 ? rough - excluded : null;
+  return {
+    roughWeightCt: rough,
+    confirmedDefectCount: num(result.confirmed_defect_count) ?? 0,
+    exclusionCt: excluded,
+    cleanRoughWeightCt: clean,
+    totalGemWeightCt: total,
+    cleanYieldPercent: clean !== null && total !== null ? (total / clean) * 100 : null,
+    roughYieldPercent: num(result.faceted_yield_percent),
+    gemCount: num(result.gem_count) ?? 0,
+    manufacturingStatus: result.manufacturing_status ?? null,
+    runtimeSeconds: num(result.runtime_seconds),
+  };
+}
+
+// 'no_verified_plan' → 'No verified plan'
+export function formatStatus(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const text = String(value).replaceAll('_', ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 
 export function preRunDefectMessage(confirmedCount) {
   return confirmedCount > 0
@@ -136,6 +188,7 @@ export function normalizeDefectAwareResult(data) {
       ? data.manufacturing_plan : null,
     coordinate_frame: data.coordinate_frame ?? null,
     settings: data.settings && typeof data.settings === 'object' ? data.settings : null,
+    performance: data.performance && typeof data.performance === 'object' ? data.performance : null,
   };
 }
 

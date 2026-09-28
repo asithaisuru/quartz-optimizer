@@ -26,6 +26,30 @@ describe('ModelViewer tabs', () => {
     expect(tabs()).toEqual(['Inspect', 'Defect Review', 'Expert Review', 'Cut Sequence']);
   });
 
+  it('hides Expert Review in presentation mode and falls back to Inspect', () => {
+    render(
+      <ModelViewer
+        modelUrl="/files/j/dense/visual_aligned_stone.ply" manufacturingPlan={COMPLETE_PLAN}
+        viewerMode="expert" showExpertReview={false}
+      />,
+    );
+    expect(tabs()).toEqual(['Inspect', 'Defect Review', 'Cut Sequence']);
+    expect(screen.getByText('Inspect').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.queryByText('Expert Review · physical pieces')).toBeNull();
+  });
+
+  it('offers gem and X-ray toggles for per-gem results without a combined cut mesh', () => {
+    render(
+      <ModelViewer
+        modelUrl="/files/j/dense/visual_aligned_stone.ply" cutUrl={null} defaultXRay
+        gemDetails={[{ index: 1, url: '/files/j/defect_aware/run/gem_1.ply' }]}
+      />,
+    );
+    expect(screen.getByTitle('Hide gems')).toBeTruthy();
+    // Presentation mode starts in X-ray so the placements are visible.
+    expect(screen.getByTitle('Use solid shell')).toBeTruthy();
+  });
+
   it('opens Expert Review and shows its physical-piece legend', () => {
     const onViewerModeChange = vi.fn();
     const { rerender } = render(

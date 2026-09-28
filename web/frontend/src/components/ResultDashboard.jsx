@@ -13,10 +13,13 @@ import DefectAwareOptimizationPanel from './DefectAwareOptimizationPanel';
 import useDefectAwareOptimization from '../hooks/useDefectAwareOptimization';
 import useStonePreservation from '../hooks/useStonePreservation';
 import StonePreservationPanel from './StonePreservationPanel';
+import FinalGemstonePanel from './FinalGemstonePanel';
 import {
   AWAITING_REVIEW_GUIDANCE, AWAITING_REVIEW_HEADLINE, CUT_SEQUENCE_LABEL,
-  confirmedDefectFingerprint, defectAwareViewerPlan, gemMeshUrl,
+  FINAL_CUT_SEQUENCE_LABEL, FINAL_PLACEMENT_LABEL,
+  confirmedDefectFingerprint, defectAwareViewerPlan, gemMeshUrl, isActiveRun,
 } from '../utils/defectAwareOptimization';
+import { PRESENTATION_MODE } from '../utils/presentationMode';
 import { expertReviewEligibility, pieceState } from '../utils/expertReview';
 import { downloadPdf, resolveBackendUrl } from '../utils/pdfDownload';
 import { validateGeometry } from '../utils/defectReview';
@@ -125,6 +128,9 @@ export default function ResultDashboard({
   // until Defect Review (job status `awaiting_defect_review`).
   awaitingDefectReview = false,
   initialOptimizerMode = OPTIMIZER_MODES.PRESERVATION,
+  // Simplified final-gemstone UI (VITE_PRESENTATION_MODE). Experimental
+  // modes stay reachable with presentationMode={false}.
+  presentationMode = PRESENTATION_MODE,
 }) {
   const [data,           setData]           = useState(null);
   const [selectedOption, setSelectedOption] = useState(null);
@@ -164,7 +170,9 @@ export default function ResultDashboard({
   // Viewer mode (Inspect / Defect Review / Cut Sequence) is lifted here so
   // the sidebar can show the matching Defect Review tools.
   const [viewerMode, setViewerMode] = useState('inspect');
-  const [optimizerMode, setOptimizerMode] = useState(initialOptimizerMode);
+  const [selectedOptimizerMode, setOptimizerMode] = useState(initialOptimizerMode);
+  // Presentation mode always uses the final (defect-aware faceted) path.
+  const optimizerMode = presentationMode ? OPTIMIZER_MODES.LEGACY : selectedOptimizerMode;
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [selectedPieceId, setSelectedPieceId] = useState(null);
 
@@ -571,7 +579,7 @@ export default function ResultDashboard({
   const isPreservationMode = optimizerMode === OPTIMIZER_MODES.PRESERVATION;
   const defectReview = useDefectReview({ apiUrl: API_URL, jobId });
   const canPlaceDefects = Boolean(overlayOffset(viewerMeshFrame(modelUrl), defectReview.frame));
-  const isExpertMode = viewerMode === 'expert';
+  const isExpertMode = viewerMode === 'expert' && !presentationMode;
   // The Expert Review tab needs the preform result to decide eligibility.
   const preform = usePreformRecovery({ apiUrl: API_URL, jobId, enabled: isPreformMode || isExpertMode });
   const expertEligibility = expertReviewEligibility({ phase: preform.phase, resultView: preform.result });
@@ -697,6 +705,54 @@ export default function ResultDashboard({
   };
   const showLegacyMetrics = !isPreservationMode && !isPreformMode && !(awaitingDefectReview && !data);
 
+  // Presentation mode renders ONLY the current final gemstone result: no
+  // legacy gems, cut plan or sequence beside it, and no experimental overlays.
+  const viewerContent = presentationMode ? {
+    cutUrl: null,
+    defectsUrl: null,
+    gemUrls: defectAwareActive ? viewerGemUrls : [],
+    gemDetails: defectAwareActive ? viewerGemDetails : [],
+    manufacturingPlan: defectAwareActive ? defectAwarePlan : null,
+    remainingSpace: null,
+    activeStrategyName: defectAwareActive ? FINAL_PLACEMENT_LABEL : null,
+    activeGemCount: defectAwareActive ? defectAwareResult.gem_count : null,
+    sequenceLabel: defectAwareActive ? FINAL_CUT_SEQUENCE_LABEL : null,
+    showConfirmedDefects: showConfirmedRegions,
+    preform: null,
+    expertReview: null,
+  } : {
+    cutUrl: isPreservationMode || defectAwareActive ? null : activeCutUrl,
+    defectsUrl: !isPreservationMode && showFractures ? defectsUrl : null,
+    gemUrls: isPreservationMode ? [] : viewerGemUrls,
+    gemDetails: isPreservationMode ? [] : viewerGemDetails,
+    manufacturingPlan: isPreservationMode ? preservation.result?.manufacturing_plan : defectAwareActive ? defectAwarePlan : manufacturingPlan,
+    remainingSpace: isPreservationMode || defectAwareActive ? null : remainingSpace,
+    activeStrategyName: isPreservationMode ? 'Stone Preservation' : defectAwareActive ? 'Defect-aware placement' : (data ? currentShape : null),
+    activeGemCount: isPreservationMode ? null : defectAwareActive ? defectAwareResult.gem_count : (data ? gemCount : null),
+    sequenceLabel: isPreservationMode ? 'Preservation cut sequence' : defectAwareActive ? CUT_SEQUENCE_LABEL : null,
+    showConfirmedDefects: isPreservationMode || (defectAwareActive && showConfirmedRegions),
+    preform: viewerPreservation || viewerPreform,
+    expertReview: viewerExpert,
+  };
+
+  const defectReviewPanel = jobId && (
+    <DefectReviewPanel
+      review={defectReview}
+      active={viewerMode === 'defects'}
+      onOpen={() => setViewerMode('defects')}
+      canPlace={canPlaceDefects}
+      apiUrl={API_URL}
+    />
+  );
+  const showReconstructionBanner = presentationMode
+    ? awaitingDefectReview && !defectAwareResult && !isActiveRun(defectAware.phase)
+    : awaitingDefectReview && !defectAwareActive;
+  const subtitle = presentationMode
+    ? (showReconstructionBanner ? 'Defect Review before gemstone placement' : 'Final Gemstone Planning')
+    : isPreservationMode ? 'Clean Material Recovery' : isPreformMode
+      ? 'Preform Recovery Planning'
+      : (awaitingDefectReview && !data ? 'Defect Review before gemstone placement' : 'Automated Yield Estimation');
+
   return (
     <div className="min-h-screen w-full flex flex-col overflow-auto lg:h-screen lg:flex-row lg:overflow-hidden">
 
@@ -704,17 +760,8 @@ export default function ResultDashboard({
       <div className="relative h-[56vh] min-h-[420px] w-full bg-black lg:h-full lg:min-h-0 lg:flex-1">
         <ModelViewer
           modelUrl={modelUrl}
-          cutUrl={isPreservationMode || defectAwareActive ? null : activeCutUrl}
-          defectsUrl={!isPreservationMode && showFractures ? defectsUrl : null}
-          gemUrls={isPreservationMode ? [] : viewerGemUrls}
-          gemDetails={isPreservationMode ? [] : viewerGemDetails}
-          manufacturingPlan={isPreservationMode ? preservation.result?.manufacturing_plan : defectAwareActive ? defectAwarePlan : manufacturingPlan}
-          remainingSpace={isPreservationMode || defectAwareActive ? null : remainingSpace}
+          {...viewerContent}
           remainingSpaceDiagnostic={remainingSpaceDiagnostic}
-          activeStrategyName={isPreservationMode ? 'Stone Preservation' : defectAwareActive ? 'Defect-aware placement' : (data ? currentShape : null)}
-          activeGemCount={isPreservationMode ? null : defectAwareActive ? defectAwareResult.gem_count : (data ? gemCount : null)}
-          sequenceLabel={isPreservationMode ? 'Preservation cut sequence' : defectAwareActive ? CUT_SEQUENCE_LABEL : null}
-          showConfirmedDefects={isPreservationMode || (defectAwareActive && showConfirmedRegions)}
           gemFrame={defectAwareActive ? defectAwareFrame : null}
           selectedGemIndex={selectedGemIndex}
           onSelectGem={setSelectedGemIndex}
@@ -724,8 +771,8 @@ export default function ResultDashboard({
             setViewerMode(mode);
           }}
           defectReview={viewerDefectReview}
-          preform={viewerPreservation || viewerPreform}
-          expertReview={viewerExpert}
+          showExpertReview={!presentationMode}
+          defaultXRay={presentationMode}
         />
       </div>
 
@@ -735,11 +782,7 @@ export default function ResultDashboard({
         {/* HEADER */}
         <div className="border-b border-slate-800 pb-4">
           <h2 className="text-2xl font-bold text-white mb-1">Analysis Report</h2>
-          <p className="text-slate-400 text-sm">
-            {isPreservationMode ? 'Clean Material Recovery' : isPreformMode
-              ? 'Preform Recovery Planning'
-              : (awaitingDefectReview && !data ? 'Defect Review before gemstone placement' : 'Automated Yield Estimation')}
-          </p>
+          <p className="text-slate-400 text-sm">{subtitle}</p>
           <button
             onClick={handleCopyId}
             className="flex items-center gap-1.5 px-2 py-1 rounded mt-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-all group"
@@ -754,7 +797,7 @@ export default function ResultDashboard({
         </div>
 
         {/* RECONSTRUCTION COMPLETE — optimization deferred until Defect Review */}
-        {awaitingDefectReview && !defectAwareActive && (
+        {showReconstructionBanner && (
           <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4" role="status" aria-label="Reconstruction complete">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
@@ -773,6 +816,38 @@ export default function ResultDashboard({
           </div>
         )}
 
+        {/* PRESENTATION MODE — Defect Review → Final Gemstones → Cut Sequence */}
+        {presentationMode && (<>
+          {jobId && (
+            <FinalGemstonePanel
+              compact={viewerMode === 'defects'}
+              optimization={defectAware}
+              confirmedCount={defectReview.review.summary.confirmed}
+              roughWeightCt={data?.raw_carats ?? null}
+              reviewAvailable={defectReview.availability === 'available'}
+              reconstructionReady={reconstructionReady}
+              settings={defectAwareSettings}
+              onSettingChange={(key, value) => defectAwareSetters[key]?.(value)}
+              onCalculate={() => defectAware.start(defectAwareSettings)}
+              onEditDefects={() => setViewerMode('defects')}
+            />
+          )}
+          {viewerMode === 'defects' ? defectReviewPanel : (<>
+            {defectReview.availability === 'available' && (
+              <label className="-mt-2 flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox" checked={showConfirmedRegions}
+                  onChange={(event) => setShowConfirmedRegions(event.target.checked)}
+                  className="accent-red-500"
+                />
+                Show Confirmed Defects
+              </label>
+            )}
+            {defectReviewPanel}
+          </>)}
+        </>)}
+
+        {!presentationMode && (<>
         {/* FRACTURE TOGGLE (only shown if fractures were detected) */}
         {hasFractures && (
           <button
@@ -789,15 +864,7 @@ export default function ResultDashboard({
         )}
 
         {/* DEFECT REVIEW — compact outside the Defect Review viewer mode */}
-        {jobId && (
-          <DefectReviewPanel
-            review={defectReview}
-            active={viewerMode === 'defects'}
-            onOpen={() => setViewerMode('defects')}
-            canPlace={canPlaceDefects}
-            apiUrl={API_URL}
-          />
-        )}
+        {defectReviewPanel}
 
         {/* DEFECT-AWARE GEM OPTIMIZATION — re-runs only placement + cuts */}
         {isPreservationMode && jobId && <StonePreservationPanel preservation={preservation}
@@ -1456,13 +1523,14 @@ export default function ResultDashboard({
 
         </div>
         </>)}
+        </>)}
 
         {/* Extended search — renders nothing if the backend doesn't
             support it yet, so this is safe to always mount. Kept mounted
-            (hidden) in Preform Recovery mode so a running legacy search
-            keeps reporting status. */}
+            (hidden) in Preform Recovery and presentation mode so a running
+            legacy search keeps reporting status. */}
         {jobId && (
-          <div className={isPreformMode || isPreservationMode ? 'hidden' : ''}>
+          <div className={presentationMode || isPreformMode || isPreservationMode ? 'hidden' : ''}>
             <ExtendedSearchPanel
               apiUrl={API_URL} jobId={jobId}
               onStatusChange={handleExtendedStatusChange}
@@ -1472,6 +1540,9 @@ export default function ResultDashboard({
 
         {/* ACTIONS */}
         <div className="mt-auto pt-4 border-t border-slate-800 space-y-3">
+          {/* The PDF is the older analysis report, not the final-gem result:
+              hidden in presentation mode until it is regenerated from it. */}
+          {!presentationMode && (<>
           <button
             onClick={handleDownloadReport}
             disabled={
@@ -1498,6 +1569,7 @@ export default function ResultDashboard({
               {pdfDownloadError}
             </p>
           )}
+          </>)}
           <a
             href={modelUrl}
             download

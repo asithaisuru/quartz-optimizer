@@ -61,10 +61,13 @@ describe('App upload + deferred optimization', () => {
     fireEvent.click(screen.getByText('upload'));
     expect(await screen.findByText('3D Reconstruction Complete')).toBeTruthy();
     expect(screen.getByText(
-      'Review confirmed defects, then calculate Stone Preservation using this reconstruction.',
+      'Review AI candidates or add manual inclusions/fractures, then calculate gemstone placement.',
     )).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Review Defects' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Calculate Stone Preservation' })).toBeTruthy();
+    // Presentation mode (the default build): one final-gemstone action, no experimental modes.
+    expect(screen.getByRole('button', { name: 'Calculate Final Gemstones' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Calculate Stone Preservation' })).toBeNull();
+    expect(screen.queryByRole('radiogroup', { name: 'Optimizer mode' })).toBeNull();
     expect(screen.queryByText('Pipeline Interrupted')).toBeNull();
     expect(screen.queryByText(/Resume from Checkpoint/)).toBeNull();
     expect(screen.queryByText(/FAILED/)).toBeNull();

@@ -619,9 +619,14 @@ export default function ModelViewer({
   // meshes and cut planes, e.g. a defect-aware result. They are offset once
   // into the rough's frame like the other overlays. Null = legacy behaviour.
   gemFrame = null,
+  // Presentation mode hides the Expert Review tab (its code stays intact).
+  showExpertReview = true,
+  // Start Inspect with the X-ray shell so gem placements are visible.
+  defaultXRay = false,
 }) {
   const [internalMode, setInternalMode] = useState('inspect');
-  const requestedMode = controlledMode ?? internalMode;
+  const selectedMode = controlledMode ?? internalMode;
+  const requestedMode = selectedMode === 'expert' && !showExpertReview ? 'inspect' : selectedMode;
   const setViewerMode = (mode) => {
     setInternalMode(mode);
     if (onViewerModeChange) onViewerModeChange(mode);
@@ -679,7 +684,7 @@ export default function ModelViewer({
   const [brightness, setBrightness] = useState(1.0);
   const [showCut, setShowCut] = useState(true);
   const [showWireframe, setShowWireframe] = useState(false);
-  const [isXRay, setIsXRay] = useState(false);
+  const [isXRay, setIsXRay] = useState(defaultXRay);
   const [showRemainingSpace, setShowRemainingSpace] = useState(false);
   const [showCandidateCuts, setShowCandidateCuts] = useState(false);
   const [roughRadius, setRoughRadius] = useState(0);
@@ -703,6 +708,9 @@ export default function ModelViewer({
   const inspectableGems = (Array.isArray(gemDetails) ? gemDetails : [])
     .filter((gem) => gem?.url);
   const hasIndividualGems = inspectableGems.length > 0;
+  // Gems to show inside the rough: the combined cut mesh or per-gem meshes
+  // (defect-aware results have only the latter).
+  const hasGemOverlay = Boolean(cutUrl) || hasIndividualGems;
   const selectedGem = (Array.isArray(gemDetails) ? gemDetails : [])
     .find((gem) => gem?.index === selectedGemIndex) || null;
 
@@ -780,7 +788,7 @@ export default function ModelViewer({
       <div className="absolute top-4 left-4 z-20 flex max-w-[calc(100%-5.5rem)] overflow-x-auto bg-slate-900/90 p-1 border border-slate-700 rounded-lg">
         {modeButton('inspect', 'Inspect', 'bg-cyan-600 text-white')}
         {modeButton('defects', 'Defect Review', 'bg-red-600 text-white')}
-        {modeButton('expert', 'Expert Review', 'bg-emerald-600 text-white')}
+        {showExpertReview && modeButton('expert', 'Expert Review', 'bg-emerald-600 text-white')}
         {modeButton('sequence', 'Cut Sequence', 'bg-amber-500 text-slate-950', canInspectSequence)}
       </div>
 
@@ -848,7 +856,7 @@ export default function ModelViewer({
       )}
 
       <div className="absolute top-4 right-4 z-20 flex flex-col gap-2">
-        {cutUrl && legacyInspect && (
+        {hasGemOverlay && legacyInspect && (
           <button
             onClick={() => setShowCut(!showCut)}
             title={showCut
@@ -862,7 +870,7 @@ export default function ModelViewer({
           title={showWireframe ? 'Hide wireframe' : 'Show wireframe'}
           className={`w-11 h-11 grid place-items-center border rounded-lg ${showWireframe ? 'bg-blue-600 border-blue-400 text-white' : 'bg-slate-800/90 border-slate-600 text-slate-300'}`}
         ><Grid className="w-4 h-4" /></button>
-        {cutUrl && legacyInspect && (
+        {hasGemOverlay && legacyInspect && (
           <button
             onClick={() => setIsXRay(!isXRay)}
             title={isXRay ? 'Use solid shell' : 'Use X-ray shell'}
@@ -1025,7 +1033,7 @@ export default function ModelViewer({
             <group rotation={BACKEND_TO_VIEWER}>
               <RoughStone
                 url={modelUrl}
-                isXRay={defectMode || expertMode || (inspectMode && preformActive) || (showCut && cutUrl && isXRay)}
+                isXRay={defectMode || expertMode || (inspectMode && preformActive) || (showCut && hasGemOverlay && isXRay)}
                 showWireframe={showWireframe} sequenceMode={sequenceMode}
                 onPick={pickingActive ? handleRoughPick : undefined}
                 onBounds={setRoughRadius}
