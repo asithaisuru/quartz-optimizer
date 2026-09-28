@@ -9,16 +9,22 @@ import useDefectReview, { draftGeometry } from '../hooks/useDefectReview';
 import usePreformRecovery from '../hooks/usePreformRecovery';
 import useExpertReview from '../hooks/useExpertReview';
 import ExpertReviewPanel from './ExpertReviewPanel';
+import DefectAwareOptimizationPanel from './DefectAwareOptimizationPanel';
+import useDefectAwareOptimization from '../hooks/useDefectAwareOptimization';
+import {
+  AWAITING_REVIEW_GUIDANCE, AWAITING_REVIEW_HEADLINE, CUT_SEQUENCE_LABEL,
+  confirmedDefectFingerprint, defectAwareViewerPlan, gemMeshUrl,
+} from '../utils/defectAwareOptimization';
 import { expertReviewEligibility, pieceState } from '../utils/expertReview';
 import { downloadPdf, resolveBackendUrl } from '../utils/pdfDownload';
 import { validateGeometry } from '../utils/defectReview';
 import { resolveBackendResource } from '../utils/backendUrl';
-import { overlayOffset, viewerMeshFrame } from '../utils/coordinates';
+import { overlayOffset, readCoordinateFrame, viewerMeshFrame } from '../utils/coordinates';
 import { OPTIMIZER_MODES, OPTIMIZER_MODE_LABELS } from '../utils/preformRecovery';
 import {
   Download, Layers, Box, Scale, Edit2, Check, X,
   Loader2, Sparkles, Copy, Hash, FileText, SunDim,
-  Gem, Maximize2, AlertTriangle, ListOrdered, ShieldCheck
+  Gem, Maximize2, AlertTriangle, ListOrdered, ShieldCheck, CheckCircle2
 } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -112,7 +118,10 @@ export default function ResultDashboard({
   modelUrl, reportUrl, cutUrl, defectsUrl,
   resultAssetBaseUrl, effectiveResultId, effectiveReportHash,
   initialShape, initialCutMode, jobId: jobIdProp,
-  pdfReportAvailable, pdfReportUrl, pdfReportFilename, pdfReportError
+  pdfReportAvailable, pdfReportUrl, pdfReportFilename, pdfReportError,
+  // Reconstruction passed its quality gate and optimization was deferred
+  // until Defect Review (job status `awaiting_defect_review`).
+  awaitingDefectReview = false,
 }) {
   const [data,           setData]           = useState(null);
   const [selectedOption, setSelectedOption] = useState(null);
@@ -143,6 +152,7 @@ export default function ResultDashboard({
   const activeResultIdRef = useRef(effectiveResultId || "result_v1");
   const activeReportHashRef = useRef(effectiveReportHash || null);
   const [showFractures,  setShowFractures]  = useState(true);
+  const [showConfirmedRegions, setShowConfirmedRegions] = useState(true);
   const [selectedGemIndex, setSelectedGemIndex] = useState(null);
   // Latest raw status payload from ExtendedSearchPanel's own polling
   // (includes remaining_space_metadata) — null until that panel has
@@ -616,6 +626,64 @@ export default function ResultDashboard({
     onSelectRegion: setSelectedRegionId,
   } : null;
 
+  // --- Defect-aware faceted optimization ---
+  // Re-packs gems around confirmed defects on the EXISTING reconstruction.
+  // The viewer and Cut Sequence switch to its gems + sequence together only
+  // while the run is completed and the backend says it is not stale;
+  // otherwise both fall back to the original optimization as a pair.
+  const confirmedFingerprint = useMemo(
+    () => confirmedDefectFingerprint(defectReview.review),
+    [defectReview.review],
+  );
+  const defectAware = useDefectAwareOptimization({ apiUrl: API_URL, jobId, confirmedFingerprint });
+  const defectAwareResult = defectAware.result;
+  const defectAwareActive = Boolean(
+    !isPreformMode && defectAware.phase === 'completed' && defectAwareResult && !defectAwareResult.stale
+  );
+  const defectAwareGems = useMemo(() => (defectAwareResult?.gems || []).map((gem, index) => ({
+    ...gem,
+    index: gem?.index ?? index + 1,
+    url: gemMeshUrl(
+      gem,
+      (path) => resolveBackendResource(path, API_URL),
+      (file) => (effectiveAssetBaseUrl && file ? `${effectiveAssetBaseUrl.replace(/\/+$/, '')}/${file}` : null),
+    ),
+  })), [defectAwareResult, effectiveAssetBaseUrl]);
+  const legacyPlanSettings = manufacturingPlan?.settings;
+  const defectAwarePlan = useMemo(
+    () => defectAwareViewerPlan(
+      defectAwareResult, { settings: legacyPlanSettings }, defectAware.lastRequest?.preform_mm ?? null,
+    ),
+    // Identity must only change with the result, so the viewer's cut step
+    // is not reset on unrelated re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [defectAwareResult, defectAware.lastRequest],
+  );
+  const defectAwareFrame = useMemo(
+    () => readCoordinateFrame(defectAwareResult?.coordinate_frame),
+    [defectAwareResult],
+  );
+  useEffect(() => { setSelectedGemIndex(null); }, [defectAwareActive]);
+  const viewerGemDetails = defectAwareActive ? defectAwareGems : gemDetailsWithUrl;
+  const viewerGemUrls = defectAwareActive
+    ? defectAwareGems.map((gem) => gem.url).filter(Boolean)
+    : gemUrls;
+  const reconstructionReady = Boolean(modelUrl);
+  const effectiveOption = data?.options?.[0] ?? null;
+  const originalSummary = data ? {
+    gemCount: (effectiveOption?.gem_details ?? data?.gem_details ?? []).length || effectiveOption?.gem_count || null,
+    weightCt: effectiveOption?.weight ?? data?.estimated_cut_carats ?? null,
+    yieldPercent: effectiveOption?.yield ?? data?.yield_percent ?? null,
+  } : null;
+  const defectAwareSettings = {
+    bladeKerfMm, preformMm: preformMarginMm, roughInsetMm, maxCutDepthMm, maxGems, minGemCarat,
+  };
+  const defectAwareSetters = {
+    bladeKerfMm: setBladeKerfMm, preformMm: setPreformMarginMm, roughInsetMm: setRoughInsetMm,
+    maxCutDepthMm: setMaxCutDepthMm, maxGems: setMaxGems, minGemCarat: setMinGemCarat,
+  };
+  const showLegacyMetrics = !isPreformMode && !(awaitingDefectReview && !data);
+
   return (
     <div className="min-h-screen w-full flex flex-col overflow-auto lg:h-screen lg:flex-row lg:overflow-hidden">
 
@@ -623,15 +691,18 @@ export default function ResultDashboard({
       <div className="relative h-[56vh] min-h-[420px] w-full bg-black lg:h-full lg:min-h-0 lg:flex-1">
         <ModelViewer
           modelUrl={modelUrl}
-          cutUrl={activeCutUrl}
+          cutUrl={defectAwareActive ? null : activeCutUrl}
           defectsUrl={showFractures ? defectsUrl : null}
-          gemUrls={gemUrls}
-          gemDetails={gemDetailsWithUrl}
-          manufacturingPlan={manufacturingPlan}
-          remainingSpace={remainingSpace}
+          gemUrls={viewerGemUrls}
+          gemDetails={viewerGemDetails}
+          manufacturingPlan={defectAwareActive ? defectAwarePlan : manufacturingPlan}
+          remainingSpace={defectAwareActive ? null : remainingSpace}
           remainingSpaceDiagnostic={remainingSpaceDiagnostic}
-          activeStrategyName={currentShape}
-          activeGemCount={gemCount}
+          activeStrategyName={defectAwareActive ? 'Defect-aware placement' : (data ? currentShape : null)}
+          activeGemCount={defectAwareActive ? defectAwareResult.gem_count : (data ? gemCount : null)}
+          sequenceLabel={defectAwareActive ? CUT_SEQUENCE_LABEL : null}
+          showConfirmedDefects={defectAwareActive && showConfirmedRegions}
+          gemFrame={defectAwareActive ? defectAwareFrame : null}
           selectedGemIndex={selectedGemIndex}
           onSelectGem={setSelectedGemIndex}
           viewerMode={viewerMode}
@@ -649,7 +720,9 @@ export default function ResultDashboard({
         <div className="border-b border-slate-800 pb-4">
           <h2 className="text-2xl font-bold text-white mb-1">Analysis Report</h2>
           <p className="text-slate-400 text-sm">
-            {isPreformMode ? 'Preform Recovery Planning' : 'Automated Yield Estimation'}
+            {isPreformMode
+              ? 'Preform Recovery Planning'
+              : (awaitingDefectReview && !data ? 'Defect Review before gemstone placement' : 'Automated Yield Estimation')}
           </p>
           <button
             onClick={handleCopyId}
@@ -663,6 +736,26 @@ export default function ResultDashboard({
             {!copyFeedback && <Copy className="w-3 h-3 text-slate-500 group-hover:text-cyan-400" />}
           </button>
         </div>
+
+        {/* RECONSTRUCTION COMPLETE — optimization deferred until Defect Review */}
+        {awaitingDefectReview && !defectAwareActive && (
+          <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4" role="status" aria-label="Reconstruction complete">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
+              <h3 className="font-semibold text-white">{AWAITING_REVIEW_HEADLINE}</h3>
+            </div>
+            <p className="mt-1.5 text-xs leading-5 text-emerald-100/90">{AWAITING_REVIEW_GUIDANCE}</p>
+            {viewerMode !== 'defects' && (
+              <button
+                type="button"
+                onClick={() => setViewerMode('defects')}
+                className="mt-3 flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-semibold text-white hover:bg-red-500"
+              >
+                <AlertTriangle className="h-4 w-4" /> Review Defects
+              </button>
+            )}
+          </div>
+        )}
 
         {/* FRACTURE TOGGLE (only shown if fractures were detected) */}
         {hasFractures && (
@@ -688,6 +781,33 @@ export default function ResultDashboard({
             canPlace={canPlaceDefects}
             apiUrl={API_URL}
           />
+        )}
+
+        {/* DEFECT-AWARE GEM OPTIMIZATION — re-runs only placement + cuts */}
+        {jobId && !isPreformMode && (
+          <DefectAwareOptimizationPanel
+            optimization={defectAware}
+            confirmedCount={defectReview.review.summary.confirmed}
+            provisionalCount={defectReview.review.summary.provisional}
+            reviewAvailable={defectReview.availability === 'available'}
+            reconstructionReady={reconstructionReady}
+            awaitingReview={awaitingDefectReview}
+            settings={defectAwareSettings}
+            onSettingChange={(key, value) => defectAwareSetters[key]?.(value)}
+            onCalculate={() => defectAware.start(defectAwareSettings)}
+            onEditDefects={() => setViewerMode('defects')}
+            original={originalSummary}
+          />
+        )}
+        {defectAwareActive && (
+          <label className="-mt-2 flex items-center gap-2 text-[11px] text-slate-400">
+            <input
+              type="checkbox" checked={showConfirmedRegions}
+              onChange={(event) => setShowConfirmedRegions(event.target.checked)}
+              className="accent-red-500"
+            />
+            Show confirmed defect safety regions with gems
+          </label>
         )}
 
         {/* EXPERT REVIEW — shown in the Expert Review viewer mode */}
@@ -886,10 +1006,10 @@ export default function ResultDashboard({
           ) : (
             <div className="flex items-end justify-between">
               <div>
-                <span className="text-4xl font-bold text-white">{data?.raw_carats ?? "..."}</span>
+                <span className="text-4xl font-bold text-white">{data?.raw_carats ?? defectAwareResult?.rough_weight_ct ?? "..."}</span>
                 <span className="text-lg text-slate-400 ml-2">cts</span>
               </div>
-              {!isPreformMode && (
+              {!isPreformMode && data && (
                 <button
                   onClick={() => {
                     setTempWeight(data?.raw_carats);
@@ -947,7 +1067,12 @@ export default function ResultDashboard({
           />
         )}
 
-        {!isPreformMode && (<>
+        {showLegacyMetrics && (<>
+        {defectAwareActive && (
+          <h3 className="border-t border-slate-800 pt-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Original Optimization (before confirmed defects)
+          </h3>
+        )}
         {/* OPTIONS LIST */}
         {data?.options?.length > 0 && (
           <div className="space-y-2">
