@@ -17,7 +17,8 @@ DECISIONS = {"pending", "usable_preform", "needs_further_separation", "waste_unu
 REASONS = {"shape_usable", "geometry_usable", "requires_additional_cut", "too_small",
            "defect_concern", "handling_concern", "commercially_impractical", "other"}
 AUTO_STATUSES = {"usable_preform", "irregular_preform", "requires_separation",
-                 "requires_further_separation", "manufacturing_invalid",
+                 "requires_further_separation", "needs_further_separation",
+                 "manufacturing_invalid",
                  "defect_constrained", "too_small", "numerical_debris"}
 MORPHOLOGIES = {"pointed", "elongated", "blocky", "rounded", "irregular"}
 SHAPES = {"pear", "marquise", "kite_diamond_preform", "emerald", "cushion",
@@ -122,6 +123,9 @@ def physical_leaves(result, job, run):
             if identifier not in active or identifier in regions:
                 raise ValueError("Region is not a unique physical leaf.")
             weight = finite(region["physical_weight_ct"], "physical weight", 0)
+            retained_weight = finite(
+                region.get("physical_retained_weight_ct", weight),
+                "physical retained contribution", 0)
             if weight <= 0 or not isinstance(region["usable"], bool):
                 raise ValueError("Invalid physical leaf usability.")
             auto = region["usable"]
@@ -135,6 +139,7 @@ def physical_leaves(result, job, run):
             regions[identifier] = {
                 "piece_id": identifier, "parent_piece_id": parent, "created_by_cut_id": created,
                 "weight_ct": weight, "physically_retained": retained,
+                "physical_retained_weight_ct": retained_weight if retained else 0.0,
                 "auto_usable": auto,
                 "auto_usability_status": region["usability_status"],
                 "morphology": region.get("morphology") if region.get("morphology") in MORPHOLOGIES else "irregular",
@@ -142,6 +147,11 @@ def physical_leaves(result, job, run):
                                             if isinstance(shape, str) and shape in SHAPES],
                 "mesh_file": _mesh_url(job, run, region),
                 "review_required": retained and not auto,
+                "expert_usable_allowed": not (
+                    finite(region.get("confirmed_defect_excluded_ct", 0), "confirmed safety mass", 0) > 0
+                    or bool(region.get("confirmed_defects_intersecting"))
+                    or region["usability_status"] == "defect_constrained"),
+
             }
     if set(regions) != active:
         raise ValueError("Result is missing physical leaf metadata.")
@@ -150,7 +160,8 @@ def physical_leaves(result, job, run):
     auto = finite(result["usable_preform_weight_ct"], "auto usable weight", 0)
     tolerance = max(1e-8, rough * 1e-8)
     if (rough <= 0 or auto > physical + tolerance or physical > rough + tolerance
-            or abs(math.fsum(regions[i]["weight_ct"] for i in retained_ids) - physical) > tolerance
+            or abs(math.fsum(regions[i]["physical_retained_weight_ct"]
+                             for i in retained_ids) - physical) > tolerance
             or abs(math.fsum(p["weight_ct"] for p in regions.values() if p["auto_usable"]) - auto) > tolerance):
         raise ValueError("Physical leaf weights do not reconcile to the immutable result.")
     if not cuts and result.get("whole_rough_usable") is not True and auto > tolerance:
@@ -171,7 +182,9 @@ def _response(result, pieces, record, current_hash):
                        "reason_code": decision.get("reason_code"), "notes": decision.get("notes", ""),
                        "reviewed_at": decision.get("reviewed_at")})
     required = [p for p in output if p["review_required"]]
-    buckets = {decision: math.fsum(p["weight_ct"] for p in required if p["decision"] == decision)
+    buckets = {decision: math.fsum(
+                   p["physical_retained_weight_ct"] for p in required
+                   if p["decision"] == decision)
                for decision in DECISIONS}
     rough, auto = result["rough_weight_ct"], result["usable_preform_weight_ct"]
     adjusted = math.fsum((auto, buckets["usable_preform"]))
@@ -255,6 +268,8 @@ def create_router(validate_job, job_lock):
                         if stored_id not in lookup or not lookup[stored_id]["review_required"]:
                             raise ValueError("Stored decision does not belong to a review-required leaf.")
                         _decision({k: stored[k] for k in ("decision", "reason_code", "notes")})
+                        if stored["decision"] == "usable_preform" and not lookup[stored_id]["expert_usable_allowed"]:
+                            raise ValueError("Confirmed-defect stock requires physical separation before usable review.")
                 if payload is not None:
                     if stale:
                         raise HTTPException(409, "Expert review is stale: the completed result changed. Use a new completed run.")
@@ -268,6 +283,8 @@ def create_router(validate_job, job_lock):
                                 raise HTTPException(404, "Physical leaf piece not found.")
                             if not lookup[piece_id]["review_required"]:
                                 raise HTTPException(409, "Only unresolved retained physical leaves accept expert decisions.")
+                            if payload.get("decision") == "usable_preform" and not lookup[piece_id]["expert_usable_allowed"]:
+                                raise HTTPException(409, "This physical piece contains a confirmed defect; further separation is required.")
                             record["piece_reviews"][piece_id] = _decision(payload, record["piece_reviews"].get(piece_id))
                         record["updated_at"] = now()
                     except ValueError as exc:

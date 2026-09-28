@@ -100,15 +100,19 @@ class PhysicalPartitionTests(unittest.TestCase):
         self.assertEqual(sum(p["retained"] for p in result["pieces"].values()), 1)
         self.assertAlmostEqual(result["retained"], 50)
 
-    def test_dirty_piece_defect_and_healthy_discard_do_not_overlap(self):
+    def test_dirty_piece_remains_retained_and_defect_mass_does_not_overlap(self):
         result = self.evaluate(points=[[-3, 0, 0]], cell_weight=2)
         self.assertAlmostEqual(result["defects"], 2)
-        self.assertAlmostEqual(result["discarded"], 45.5)
-        self.assertAlmostEqual(result["retained"], 47.5)
+        self.assertAlmostEqual(result["discarded"], 0)
+        self.assertAlmostEqual(result["retained"], 93)
         self.assertAlmostEqual(result["kerf"], 5)
         self.assertAlmostEqual(result["retained"] + result["kerf"] + result["defects"] + result["discarded"], 100)
-        dirty = next(p for p in result["pieces"].values() if not p["retained"])
-        self.assertEqual(dirty["discard_reason"], "confirmed_defect_containing_piece")
+        dirty = next(p for p in result["pieces"].values()
+                     if p["confirmed_defect_loss_ct"] > 0)
+        self.assertTrue(dirty["retained"])
+        self.assertIsNone(dirty["discard_reason"])
+        self.assertAlmostEqual(dirty["physical_retained_weight_ct"],
+                               dirty["weight_ct"] - 2)
 
     def test_physical_defect_blade_intersection_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "confirmed defect"):
@@ -223,7 +227,17 @@ class PhysicalRecoveryTests(unittest.TestCase):
             self.assertFalse(r["target_applicable"])
             self.assertIsNone(r["target_met"])
             self.assertEqual(r["manufacturing_status"], "no_verified_plan")
-            self.assertGreater(r["recovery_accounting"]["unresolved_weight_ct"], 0)
+            # Uncut defect-constrained stock is accounted as a retained physical
+            # leaf, not an unassigned mass bucket or an imaginary removed cavity.
+            self.assertEqual(r["recovery_accounting"]["unresolved_weight_ct"], 0)
+            retained = 100 - r["confirmed_defect_excluded_ct"]
+            self.assertAlmostEqual(r["physical_retained_weight_ct"], retained)
+            self.assertAlmostEqual(r["unresolved_retained_weight_ct"], retained)
+            self.assertEqual(r["usable_preform_weight_ct"], 0)
+            self.assertEqual(r["confirmed_defect_physically_discarded_ct"], 0)
+            self.assertEqual(r["physical_piece_count"], 1)
+            self.assertEqual(r["regions"][0]["usability_status"], "needs_further_separation")
+            self.assertEqual(r["discarded_regions"], [])
             self.assertEqual(r["recovery_accounting"]["explicit_discarded_weight_ct"], 0)
             self.assertAlmostEqual(r["recovery_accounting"]["mass_balance_error_ct"], 0)
 

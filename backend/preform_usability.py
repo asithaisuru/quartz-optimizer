@@ -57,7 +57,7 @@ def validate_region(piece, cfg, scale, morphology_fn, *, manufacturing_valid,
         status = "numerical_debris"
         rejected.append("nonpositive_or_invalid_physical_volume")
     elif piece["confirmed_defect_loss_ct"] > 0:
-        status = "defect_constrained"
+        status = "needs_further_separation"
         rejected.append("confirmed_defect_in_physical_piece")
     elif weight < minimum_weight or piece.get("discard_reason") == "below_minimum_secondary_mass":
         status = "too_small"
@@ -129,7 +129,9 @@ def evaluate_usability(physical, cfg, scale, morphology_fn):
             minimum_weight=0.0 if piece is primary else cfg["min_secondary_carat"])
     usable = math.fsum(p["usability"]["usable_preform_weight_ct"]
                        for p in physical["pieces"].values())
-    nonusable = math.fsum(p["weight_ct"] for p in retained if not p["usability"]["usable"])
+    nonusable = math.fsum(
+        p.get("physical_retained_weight_ct", p["weight_ct"])
+        for p in retained if not p["usability"]["usable"])
     error = physical["retained"] - math.fsum((usable, nonusable))
     tolerance = physical["balance"]["mass_balance_tolerance_ct"]
     if usable < 0 or nonusable < 0 or abs(error) > tolerance:
@@ -142,6 +144,7 @@ def evaluate_usability(physical, cfg, scale, morphology_fn):
         "usable_regions": [p["region_id"] for p in retained if p["usability"]["usable"]],
         "nonusable_regions": [
             {"region_id": p["region_id"], "physical_weight_ct": p["weight_ct"],
+             "physical_retained_weight_ct": p.get("physical_retained_weight_ct", p["weight_ct"]),
              "usability_status": p["usability"]["usability_status"],
              "rejection_reasons": p["usability"]["rejection_reasons"]}
             for p in retained if not p["usability"]["usable"]],

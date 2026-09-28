@@ -191,17 +191,23 @@ class RecoveryTests(unittest.TestCase):
             self.assertTrue(result["manufacturing_plan"]["diagnostics"]["exact_sequence_verified"])
             self.assertGreater(result["estimated_kerf_loss_ct"], 0)
             self.assertGreater(result["diagnostics"]["usable_plan_count"], 0)
-            self.assertTrue(result["discarded_regions"])
-            for rejected in result["discarded_regions"]:
-                self.assertIn("suggested_finish_shapes", rejected)
-                self.assertFalse(rejected["usable"])
-                self.assertEqual(rejected["usable_preform_weight_ct"], 0)
-                self.assertTrue(rejected["rejection_reasons"])
+            self.assertEqual(result["discarded_regions"], [])
+            dirty = [region for region in result["regions"]
+                     if region["confirmed_defects_intersecting"]]
+            self.assertTrue(dirty)
+            for unresolved in dirty:
+                self.assertIn("suggested_finish_shapes", unresolved)
+                self.assertFalse(unresolved["usable"])
+                self.assertEqual(unresolved["usable_preform_weight_ct"], 0)
+                self.assertEqual(unresolved["usability_status"], "needs_further_separation")
+                self.assertTrue(unresolved["rejection_reasons"])
+                self.assertIsNone(unresolved["discard_reason"])
+            self.assertEqual(result["recovery_accounting"]["explicit_discarded_weight_ct"], 0)
             self.assertLess(result["settings"]["blade_kerf_mm"] if "settings" in result else .5,
                             result["diagnostics"]["pitch_mm"])
             self.assertLessEqual(result["retained_preform_weight_ct"] + result["estimated_kerf_loss_ct"], 100)
             scale = result["coordinate_frame"]["mm_per_mesh_unit"]
-            for region in result["regions"]:
+            for region in (r for r in result["regions"] if r["usable"]):
                 mesh = trimesh.load(Path(tmp) / region["mesh_file"], process=False)
                 self.assertFalse(safety_mask(mesh.vertices * scale, [ellipsoid()], 0).any())
             self.assertIsNone(result["target_met"])

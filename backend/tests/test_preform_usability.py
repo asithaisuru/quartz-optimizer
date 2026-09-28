@@ -114,8 +114,10 @@ class UsabilityTests(unittest.TestCase):
         usability = self.assess(result)
         self.assertEqual(usability["usable_preform_weight_ct"], 0)
         self.assertEqual(next(iter(result["pieces"].values()))["usability"]["usability_status"],
-                         "defect_constrained")
-        self.assertAlmostEqual(result["defects"] + result["discarded"], 100)
+                         "needs_further_separation")
+        self.assertEqual(result["discarded"], 0)
+        self.assertAlmostEqual(result["defects"] + result["retained"], 100)
+        self.assertTrue(next(iter(result["pieces"].values()))["retained"])
 
     def test_better_usable_mass_beats_higher_physical_retention(self):
         indices = np.vstack([cells((4, 4, 4)).indices,

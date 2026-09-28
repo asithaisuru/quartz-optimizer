@@ -304,3 +304,44 @@ def test_persisted_review_is_readable_through_a_new_app_instance(env):
         response=client.get(env["url"])
     assert response.status_code==200
     assert response.json()["summary"]["expert_confirmed_additional_usable_weight_ct"]==50
+
+
+@pytest.mark.parametrize("field,value", [
+    ("confirmed_defect_excluded_ct", 2.0),
+    ("confirmed_defects_intersecting", ["confirmed-inclusion"]),
+    ("usability_status", "defect_constrained"),
+])
+def test_confirmed_defect_leaf_requires_separation_before_expert_usable(env, field, value):
+    result = env["result"]
+    result["regions"][1][field] = value
+    atomic_json(env["run"] / "result.json", result)
+    response = get(env)
+    piece = next(p for p in response["pieces"] if p["piece_id"] == "P3")
+    assert piece["review_required"] and not piece["expert_usable_allowed"]
+    blocked = env["client"].patch(env["url"] + "/pieces/P3",
+                                 json={"decision":"usable_preform"})
+    assert blocked.status_code == 409
+    response = decide(env, "P3", "needs_further_separation", reason_code="defect_concern")
+    assert response["summary"]["expert_confirmed_additional_usable_weight_ct"] == 0
+
+
+def test_dirty_leaf_uses_only_healthy_retained_contribution_in_review_totals(env):
+    result = env["result"]
+    dirty = result["regions"][1]
+    dirty.update(
+        usability_status="needs_further_separation",
+        confirmed_defect_excluded_ct=2.0,
+        confirmed_defects_intersecting=["confirmed-inclusion"],
+        physical_retained_weight_ct=48.0,
+    )
+    result["physical_retained_weight_ct"] = 96.0
+    result["physical_retention_percent"] = 96.0
+    atomic_json(env["run"] / "result.json", result)
+    response = get(env)
+    piece = next(p for p in response["pieces"] if p["piece_id"] == "P3")
+    assert piece["weight_ct"] == 50
+    assert piece["physical_retained_weight_ct"] == 48
+    assert not piece["expert_usable_allowed"]
+    assert response["summary"]["pending_review_weight_ct"] == 76
+    response = decide(env, "P3", "needs_further_separation", reason_code="defect_concern")
+    assert response["summary"]["needs_further_separation_weight_ct"] == 48

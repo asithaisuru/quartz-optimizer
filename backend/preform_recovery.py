@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import hashlib
+import math
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from preform_material import MODEL_VERSION as PHYSICAL_MODEL_VERSION, VoxelStock
 from preform_usability import MODEL_VERSION, evaluate_usability, plan_score, validate_region
 from preform_topology import consolidate_topology
 from preform_features import neck_candidates, plane_key, component_candidates
+from preform_defect_candidates import defect_candidates
 
 SHAPES = {
     "pointed": ["pear", "marquise", "kite_diamond_preform"],
@@ -66,6 +68,19 @@ def recovery_metrics(rough_weight, retained_weight, target=85.0, constrained=Fal
         "target_context": "defect_constrained" if constrained else "defect_free",
         "target_met": None if constrained else bool(percent >= target),
     }
+
+
+def defect_constrained_plan_score(physical, usability):
+    """Rank verified plans without treating an unresolved dirty leaf as loss."""
+    dirty_weight = math.fsum(
+        piece["weight_ct"] for piece in physical["pieces"].values()
+        if piece["retained"] and piece["confirmed_defect_loss_ct"] > 0)
+    # Adding kerf back measures healthy material preserved from explicit
+    # discard. Kerf is compared separately after dirty-leaf isolation.
+    healthy_preserved = physical["retained"] + physical["kerf"]
+    return (healthy_preserved, -dirty_weight, 1, -physical["kerf"],
+            -len(physical["plan"]["sequence"]),
+            usability["usable_preform_weight_ct"])
 
 
 def morphology(points):
@@ -212,7 +227,9 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
              "candidates_geometrically_valid":0, "candidates_manufacturing_validated":0,
              "states_explored":0, "states_pruned":0, "maximum_depth_reached":0,
              "termination_reason":None, "best_usable_recovery_progression":[],
-             "candidate_kinds":{}}
+             "candidate_kinds":{}, "defect_candidates_generated":0,
+             "defect_candidates_verified":0, "generic_candidates_generated":0,
+             "evaluation_order":[], "stage_runtime_seconds":{}}
     diagnostics = {
         "resolution": resolution, "pitch_mesh_units": pitch, "pitch_mm": pitch * scale,
         "mass_basis": "complete rough voxel solid calibrated once to measured rough weight",
@@ -237,6 +254,8 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         "rejection_reasons": ["whole_rough_manufacturing_check_not_completed"],
     }
     comparisons = []
+    search_deadline = time_limit
+    search_stage = "generic"
     seen = set()
 
     def reject(reason):
@@ -268,13 +287,13 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
             except (QhullError, ValueError, ZeroDivisionError):
                 reject("invalid_validation_envelope")
                 return (0.0, -len(chunks))
-        remaining = time_limit - (time.monotonic() - started)
+        remaining = min(time_limit, search_deadline) - (time.monotonic() - started)
         if remaining <= 0:
             return (0.0, -len(chunks))
         plan = plan_cut_sequence(
             rough, envelopes, blade_kerf_mm=cfg["blade_kerf_mm"],
             preform_margin_mm=cfg["preform_mm"], max_cut_depth_mm=cfg["max_cut_depth_mm"],
-            mm_per_mesh_unit=scale, pitch=pitch, time_limit_seconds=min(3.0, remaining),
+            mm_per_mesh_unit=scale, pitch=pitch, time_limit_seconds=min(1.5 if search_stage == "defect" else 3.0, remaining),
             gem_values=([rough_weight_ct] if uncut else [len(c) * per_cell for c in chunks]),
             gem_ids=[f"G{i + 1}" for i in range(len(envelopes))],
             defect_points=defect_points, defect_radius_mesh=half_diagonal,
@@ -303,7 +322,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                 # No-cut credit belongs only to the entire original physical piece.
                 if len(physical["pieces"]) != 1:
                     raise ValueError("Uncut stock must remain one physical piece.")
-                if physical["retained"] > 0:
+                if physical["retained"] > 0 or annotations:
                     uncut_physical = physical
         except (ValueError, QhullError, ZeroDivisionError, IndexError):
             reject("physical_partition_failed")
@@ -313,6 +332,8 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                                 "retained_preform_weight_ct": None,
                                 "reason": "physical_partition_failed"})
             return (0.0, -len(chunks))
+        if not uncut and search_stage == "defect":
+            trace["defect_candidates_verified"] += 1
         diagnostics["verified_plan_count"] = diagnostics.get("verified_plan_count", 0) + 1
         diagnostics["usable_plan_count"] += int(physical["usability"]["usable_preform_weight_ct"] > 0)
         for piece in physical["pieces"].values():
@@ -327,85 +348,108 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         if not plan["sequence"] and not whole_validation["usable"]:
             if physical["usability"]["usable_preform_weight_ct"] != 0:
                 raise ValueError("Unusable uncut stock cannot credit candidate lobes.")
-        score = plan_score(physical, physical["usability"])
+        usable_weight = physical["usability"]["usable_preform_weight_ct"]
+        if target_constrained:
+            score = defect_constrained_plan_score(physical, physical["usability"])
+        else:
+            score = plan_score(physical, physical["usability"])
         tolerance = physical["balance"]["mass_balance_tolerance_ct"]
         better = (best is None or score[0] > best[0][0] + tolerance
                   or (abs(score[0] - best[0][0]) <= tolerance
                       and score[1:] > best[0][1:]))
-        if score[0] > 0 and better:
+        if usable_weight > 0 and better:
             best = (score, physical)
             trace["best_usable_recovery_progression"].append({
-                "state":trace["states_explored"],"usable_weight_ct":score[0],
-                "usable_recovery_percent":score[0]/rough_weight_ct*100,
+                "state":trace["states_explored"],"usable_weight_ct":usable_weight,
+                "usable_recovery_percent":usable_weight/rough_weight_ct*100,
                 "cuts":len(plan["sequence"])})
         return score
 
     assess(initial, uncut=True)
     frontier = [(initial, assessment_unusable)] if len(points) >= 4 else []
-    for depth in range(cfg["max_regions"] - 1):
-        if not frontier:
-            break
-        successors = []
-        trace["maximum_depth_reached"] = depth + 1
-        for chunks, needs in frontier:
-            proposals = []
-            for index, chunk in enumerate(chunks):
-                if len(chunk) < 8:
-                    continue
-                solid = stock.subset(chunk)
-                priority = sum(int(i) in needs for i in chunk) / len(chunk) if needs else 0
-                for feature in (neck_candidates(solid, cfg["min_secondary_carat"], per_cell)
-                                + component_candidates(solid, cfg["min_secondary_carat"], per_cell)):
-                    variants = [(np.asarray(feature["normal"]), feature["offset"], feature["kind"])]
-                    if feature["strong"]:
-                        normal = np.asarray(feature["normal"])
-                        tangent = np.cross(normal, np.eye(3)[np.argmin(abs(normal))])
-                        tangent /= np.linalg.norm(tangent)
-                        for angle in (-np.pi/36, np.pi/36):
-                            rotated = normal*np.cos(angle)+tangent*np.sin(angle)
-                            variants.append((rotated, float(rotated @ (normal*feature["offset"])), "neck_angular_neighbour"))
-                    for normal,offset,kind in variants:
-                        trace["candidate_planes_generated"] += 1
-                        signature = hashlib.sha1(chunk.tobytes()).hexdigest()
-                        key = (signature, plane_key(normal,offset,pitch))
-                        if key in seen:
-                            trace["duplicate_planes_removed"] += 1
-                            continue
-                        seen.add(key)
-                        projection = points[chunk] @ normal
-                        corridor = (cfg["blade_kerf_mm"]/2+cfg["preform_mm"])/scale + half_diagonal + pitch*.05
-                        left, right = chunk[projection < offset-corridor], chunk[projection > offset+corridor]
-                        if min(len(left),len(right)) < 4:
-                            trace["states_pruned"] += 1
-                            continue
-                        if len(physical_defects) and np.any(
-                            np.abs(physical_defects @ normal-offset) <= cfg["blade_kerf_mm"]/scale/2+half_diagonal):
-                            trace["states_pruned"] += 1
-                            continue
-                        trace["candidates_geometrically_valid"] += 1
-                        estimate_kerf = np.count_nonzero(abs(projection-offset) < cfg["blade_kerf_mm"]/scale/2)*per_cell
-                        rank = (priority, feature["rank"], -estimate_kerf, min(len(left),len(right)))
-                        proposals.append((rank,index,left,right,normal,kind))
-            proposals.sort(key=lambda p:p[0], reverse=True)
-            # Reserve budget for recursive residual states instead of exhausting
-            # every first-level quantile before reaching depth two.
-            per_state = 6 if depth == 0 else 4
-            trace["states_pruned"] += max(0,len(proposals)-per_state)
-            for _,index,left,right,normal,kind in proposals[:per_state]:
-                if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= time_limit:
-                    break
-                candidate = chunks[:index]+[left,right]+chunks[index+1:]
-                diagnostics["candidates_tested"] += 1
-                trace["candidate_kinds"][kind] = trace["candidate_kinds"].get(kind,0)+1
-                score = assess(candidate, preferred_normal=normal)
-                successors.append((score,candidate,assessment_unusable.copy()))
-            if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= time_limit:
+    _, rough_axes = np.linalg.eigh(np.cov(points.T))
+    phases = ([("defect", min(2, cfg["max_regions"] - 1), time_limit * .65)]
+              if annotations else [])
+    phases.append(("generic", cfg["max_regions"] - 1, time_limit))
+    for search_stage, depth_limit, search_deadline in phases:
+        phase_started = time.monotonic()
+        if search_stage == "generic" and annotations:
+            frontier = (frontier + [(initial, set())])[:beam_width]
+        for depth in range(depth_limit):
+            if not frontier:
                 break
-        successors.sort(key=lambda item:item[0],reverse=True)
-        trace["states_pruned"] += max(0,len(successors)-beam_width)
-        frontier = [(candidate,needs) for _,candidate,needs in successors[:beam_width]]
-        if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= time_limit:
-            break
+            successors = []
+            trace["maximum_depth_reached"] = max(
+                trace["maximum_depth_reached"], depth + 1)
+            for chunks, needs in frontier:
+                proposals = []
+                for index, chunk in enumerate(chunks):
+                    if len(chunk) < 8:
+                        continue
+                    if search_stage == "defect" and not np.any(blocked[chunk]):
+                        continue
+                    solid = stock.subset(chunk)
+                    priority = sum(int(i) in needs for i in chunk) / len(chunk) if needs else 0
+                    if search_stage == "defect":
+                        features = defect_candidates(solid, snapshot, scale, cfg, rough_axes=rough_axes.T)
+                    else:
+                        features = (neck_candidates(solid, cfg["min_secondary_carat"], per_cell)
+                                    + component_candidates(solid, cfg["min_secondary_carat"], per_cell))
+                    for feature in features:
+                        variants = [(np.asarray(feature["normal"]), feature["offset"], feature["kind"])]
+                        if feature["strong"]:
+                            normal = np.asarray(feature["normal"])
+                            tangent = np.cross(normal, np.eye(3)[np.argmin(abs(normal))])
+                            tangent /= np.linalg.norm(tangent)
+                            for angle in (-np.pi/36, np.pi/36):
+                                rotated = normal*np.cos(angle)+tangent*np.sin(angle)
+                                variants.append((rotated, float(rotated @ (normal*feature["offset"])), "neck_angular_neighbour"))
+                        for normal,offset,kind in variants:
+                            trace["candidate_planes_generated"] += 1
+                            trace["defect_candidates_generated" if search_stage == "defect"
+                                  else "generic_candidates_generated"] += 1
+                            signature = hashlib.sha1(chunk.tobytes()).hexdigest()
+                            key = (signature, plane_key(normal,offset,pitch))
+                            if key in seen:
+                                trace["duplicate_planes_removed"] += 1
+                                continue
+                            seen.add(key)
+                            projection = points[chunk] @ normal
+                            corridor = (cfg["blade_kerf_mm"]/2+cfg["preform_mm"])/scale + half_diagonal + pitch*.05
+                            left, right = chunk[projection < offset-corridor], chunk[projection > offset+corridor]
+                            if min(len(left),len(right)) < 4:
+                                trace["states_pruned"] += 1
+                                continue
+                            if len(physical_defects) and np.any(
+                                np.abs(physical_defects @ normal-offset) <= cfg["blade_kerf_mm"]/scale/2+half_diagonal):
+                                trace["states_pruned"] += 1
+                                continue
+                            trace["candidates_geometrically_valid"] += 1
+                            estimate_kerf = np.count_nonzero(abs(projection-offset) < cfg["blade_kerf_mm"]/scale/2)*per_cell
+                            rank = (priority, feature["rank"], -estimate_kerf, min(len(left),len(right)))
+                            proposals.append((rank,index,left,right,normal,kind))
+                proposals.sort(key=lambda p:p[0], reverse=True)
+                # Reserve budget for recursive residual states instead of exhausting
+                # every first-level quantile before reaching depth two.
+                per_state = (4 if depth == 0 else 2) if search_stage == "defect" else (6 if depth == 0 else 4)
+                trace["states_pruned"] += max(0,len(proposals)-per_state)
+                for _,index,left,right,normal,kind in proposals[:per_state]:
+                    if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= search_deadline:
+                        break
+                    candidate = chunks[:index]+[left,right]+chunks[index+1:]
+                    diagnostics["candidates_tested"] += 1
+                    trace["candidate_kinds"][kind] = trace["candidate_kinds"].get(kind,0)+1
+                    trace["evaluation_order"].append(kind)
+                    score = assess(candidate, preferred_normal=normal)
+                    successors.append((score,candidate,assessment_unusable.copy()))
+                if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= search_deadline:
+                    break
+            successors.sort(key=lambda item:item[0],reverse=True)
+            trace["states_pruned"] += max(0,len(successors)-beam_width)
+            frontier = [(candidate,needs) for _,candidate,needs in successors[:beam_width]]
+            if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= search_deadline:
+                break
+        trace["stage_runtime_seconds"][search_stage] = time.monotonic() - phase_started
     trace["termination_reason"] = (
         "time_limit" if time.monotonic()-started >= time_limit else
         "candidate_limit" if diagnostics["candidates_tested"] >= candidate_limit else
@@ -415,24 +459,56 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
     output.mkdir(parents=True, exist_ok=True)
     regions, discarded_regions = [], []
     physical = best[1] if best else uncut_physical
+    if best is None and annotations:
+        # No selected cut means the full original stock remains ONE physical leaf.
+        # Confirmed safety mass is an overlapping exclusion, not removed material.
+        piece = {
+            "piece_id": "rough_piece_1", "region_id": "R1", "mesh": stock,
+            "weight_ct": rough_weight_ct, "confirmed_defect_loss_ct": defect_weight,
+            "retained": True, "discard_reason": None,
+            "physical_retained_weight_ct": rough_weight_ct - defect_weight,
+            "parent_piece_id": None, "created_by_cut_step": None,
+        }
+        physical = {
+            "pieces": {"rough_piece_1": piece},
+            "plan": {"status": "no_verified_plan", "sequence": []},
+            "retained": rough_weight_ct - defect_weight, "kerf": 0.0,
+            "defects": defect_weight,
+            "discarded": 0.0, "partitions": [], "natural_components": [],
+            "balance": mass_balance(
+                rough_weight_ct, retained=rough_weight_ct - defect_weight,
+                defects=defect_weight),
+        }
+        physical["usability"] = evaluate_usability(physical, cfg, scale, morphology)
+        piece["usability"]["usability_status"] = "needs_further_separation"
+        for row in physical["usability"]["nonusable_regions"]:
+            row["usability_status"] = "needs_further_separation"
     plan = physical["plan"] if best else None
     if physical:
         for piece in physical["pieces"].values():
             public_piece = {
                 "region_id": piece["region_id"], "physical_piece_id": piece["piece_id"],
                 "physical_weight_ct": piece["weight_ct"],
+                "physical_retained_weight_ct": piece.get(
+                    "physical_retained_weight_ct", piece["weight_ct"]),
                 "canonical_source_component_id": piece.get("canonical_source_component_id"),
                 "physical_parent_piece_id": piece.get("parent_piece_id"),
                 "created_by_cut_step": piece.get("created_by_cut_step"),
                 "credited_to_usable_recovery": piece["usability"]["usable"],
                 "separation_required": piece["usability"]["usability_status"] in
-                    {"requires_separation","requires_further_separation"},
+                    {"requires_separation", "requires_further_separation",
+                     "needs_further_separation"},
                 "volume_mesh_units": abs(float(piece["mesh"].volume)),
                 "confirmed_defect_excluded_ct": piece["confirmed_defect_loss_ct"],
                 "discard_reason": piece["discard_reason"],
                 **piece["usability"],
                 "suggested_finish_shapes": SHAPES[piece["usability"]["morphology"]],
             }
+            # Derive after merging usability so the public flag always follows
+            # the final normalized status.
+            public_piece["separation_required"] = public_piece["usability_status"] in {
+                "requires_separation", "requires_further_separation",
+                "needs_further_separation"}
             if not piece["retained"]:
                 public_piece["explicit_discarded_weight_ct"] = piece["weight_ct"] - piece["confirmed_defect_loss_ct"]
                 discarded_regions.append(public_piece)
@@ -445,16 +521,22 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                 **public_piece, "retained_weight_ct": piece["usability"]["usable_preform_weight_ct"],
                 "morphology": kind, "morphology_metrics": metrics,
                 "shape_compatibility_score": None,
-                "mesh_file": region_id + ".ply", "confirmed_defects_intersecting": [],
+                "mesh_file": region_id + ".ply",
+                "confirmed_defects_intersecting": (
+                    [a.get("id") for a in annotations]
+                    if piece["confirmed_defect_loss_ct"] > 0 else []),
                 "usefulness_status": "geometric_screen_only_not_workshop_validated",
             })
         retained, kerf_loss = physical["retained"], physical["kerf"]
         defect_loss, explicit_discard = physical["defects"], physical["discarded"]
+        physically_discarded_defect = math.fsum(
+            p["confirmed_defect_loss_ct"] for p in physical["pieces"].values()
+            if not p["retained"])
         unresolved = 0.0
         balance = physical["balance"]
     else:
         # A failed search is not evidence that the healthy physical stock vanished.
-        retained = kerf_loss = explicit_discard = 0.0
+        retained = kerf_loss = explicit_discard = physically_discarded_defect = 0.0
         defect_loss = defect_weight
         unresolved = rough_weight_ct - defect_weight
         balance = mass_balance(rough_weight_ct, defects=defect_loss, unresolved=unresolved)
@@ -484,6 +566,11 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
     limited = diagnostics["candidates_tested"] >= candidate_limit or time.monotonic() - started >= time_limit
     diagnostics.update({
         "runtime_seconds": time.monotonic() - started, "resource_limit_reached": limited,
+        "defect_candidates_generated": trace["defect_candidates_generated"],
+        "defect_candidates_verified": trace["defect_candidates_verified"],
+        "generic_candidates_generated": trace["generic_candidates_generated"],
+        "states_explored": trace["states_explored"],
+        "termination_reason": trace["termination_reason"],
         "kerf_estimation": "closed physical blade-slab volume on each verified parent solid",
         "confirmed_safety_zone_weight_ct": defect_weight,
         "validation_defect_zone_weight_ct": int(validation_blocked_raw.sum()) * per_cell,
@@ -527,7 +614,8 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
             "credit_basis": "overlap_with_validated_physical_pieces_only",
             "credited_to_usable_recovery": any(c["usable_preform_weight_ct"] > 0 for c in contributions),
             "separation_required": any(c["usability_status"] in
-                {"requires_separation","requires_further_separation"} for c in contributions),
+                {"requires_separation", "requires_further_separation",
+                 "needs_further_separation"} for c in contributions),
             "safety_voxel_count": int(usable[tuple(raw_indices[active].T)].sum()),
             "morphology": check["morphology"], "suggested_finish_shapes": SHAPES[check["morphology"]],
             "candidate_geometry_eligible": check["geometry_eligible"],
@@ -549,11 +637,14 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
     message = "Highest-ranked geometrically usable preform plan found within implemented search limits."
     if not best:
         message = ("No usable preform plan passed the geometric and manufacturing checks; "
+                   "retained physical stock remains available for Expert Review and further separation."
+                   if annotations else
+                   "No usable preform plan passed the geometric and manufacturing checks; "
                    "physical stock accounting is reported separately.")
     elif metrics["target_met"] is False:
         message = "Expert-defined usable-preform recovery target not reached under current bounded search."
     physical_piece_count = len(physical["pieces"]) if physical else 1
-    requires_separation = sum(r["physical_weight_ct"] for r in regions
+    requires_separation = sum(r["physical_retained_weight_ct"] for r in regions
                               if r["separation_required"])
     selected_cuts = plan["sequence"] if plan else []
     if physical_piece_count != len(selected_cuts) + 1:
@@ -563,6 +654,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         "candidate_region_count": len(component_diagnostics),
         "reconstruction_component_count": topology["canonical_component_count"],
         "requires_separation_weight_ct": requires_separation,
+        "needs_further_separation_weight_ct": requires_separation,
         "candidate_regions": component_diagnostics,
         "physical_piece_graph": {"root_piece_id":"rough_piece_1", "initial_piece_count":1,
             "partitions": accounting["partitions"],
@@ -579,8 +671,11 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         "stock_partition_basis": "one_original_physical_stock_and_verified_cuts_only",
         "usable_region_count": usability["usable_region_count"],
         "usable_preform_accounting": usable_accounting,
-        "estimated_kerf_loss_ct": kerf_loss, "confirmed_defect_excluded_ct": defect_loss,
-        "confirmed_defect_excluded_percent": defect_loss / rough_weight_ct * 100,
+        "estimated_kerf_loss_ct": kerf_loss, "confirmed_defect_excluded_ct": defect_weight,
+        "confirmed_defect_excluded_percent": defect_weight / rough_weight_ct * 100,
+        "confirmed_defect_physically_discarded_ct": physically_discarded_defect,
+        "unresolved_retained_weight_ct": usability["nonusable_physical_weight_ct"],
+        "confirmed_exclusion_accounting": "Safety exclusion is separate from healthy retained mass; dirty-piece geometry remains intact until physical isolation",
         "usable_after_defects_ct": rough_weight_ct - defect_weight,
         "recovery_of_usable_percent": (usable_weight / (rough_weight_ct - defect_weight) * 100
                                        if rough_weight_ct > defect_weight else None),
@@ -604,7 +699,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
             "Reconstruction components are candidate geometry; only verified cuts create physical children.",
             "Mesh-calibrated display scale and coarse voxel geometric volume can differ; inspect volume ratio.",
             "Confirmed geometries exclude conservative voxel safety cells; placement allowances are virtual.",
-            "Dirty physical leaves are discarded conservatively; enclosed defects are not assumed extractable.",
+            "Dirty physical leaves remain retained for further separation; confirmed safety mass is never credited as healthy or usable.",
             "Disconnected physical stock cannot automatically count as one usable preform.",
             "Candidate component eligibility is not a selected manufacturing-valid useful region.",
             "The cut sequence requires physical workshop validation; kite_diamond_preform is advisory.",

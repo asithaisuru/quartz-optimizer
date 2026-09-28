@@ -306,20 +306,23 @@ def partition_stock(stock, plan, weight, defect_points, cell_weight, kerf_mesh,
 def classify_pieces(pieces, minimum_secondary):
     """Keep the largest clean piece regardless of secondary minimum.
 
-    A dirty leaf remains a physical waste piece; subtracting defect cells never
-    creates a supposedly extractable cavity. Every excluded gram has a reason.
+    A dirty leaf remains retained physical stock which requires another
+    separation operation.  Its confirmed safety mass is excluded from retained
+    healthy mass, but the rest of that leaf is neither erased nor called waste.
     """
     clean = [piece for piece in pieces.values() if piece["confirmed_defect_loss_ct"] == 0]
     primary = max(clean, key=lambda p: p["weight_ct"]) if clean else None
     for index, piece in enumerate(pieces.values(), 1):
-        if piece["confirmed_defect_loss_ct"] > 0:
-            reason = "confirmed_defect_containing_piece"
-        elif piece is not primary and piece["weight_ct"] < minimum_secondary:
+        dirty = piece["confirmed_defect_loss_ct"] > 0
+        if not dirty and piece is not primary and piece["weight_ct"] < minimum_secondary:
             reason = "below_minimum_secondary_mass"
         else:
             reason = None
         piece["discard_reason"] = reason
         piece["retained"] = reason is None
+        piece["physical_retained_weight_ct"] = (
+            max(0.0, piece["weight_ct"] - piece["confirmed_defect_loss_ct"])
+            if piece["retained"] else 0.0)
         piece["region_id"] = ("R" if reason is None else "W") + str(index)
 
 
@@ -334,7 +337,7 @@ def evaluate_plan(stock, plan, weight, defect_points, cell_weight, kerf_mesh,
     if len(pieces) != len(partitions) + 1:
         raise ValueError("Physical leaves must equal selected binary cuts plus one.")
     classify_pieces(pieces, minimum_secondary)
-    retained = math.fsum(p["weight_ct"] for p in pieces.values() if p["retained"])
+    retained = math.fsum(p["physical_retained_weight_ct"] for p in pieces.values())
     defects = math.fsum(p["confirmed_defect_loss_ct"] for p in pieces.values())
     discarded = math.fsum(p["weight_ct"] - p["confirmed_defect_loss_ct"]
                           for p in pieces.values() if not p["retained"])
