@@ -54,7 +54,7 @@ def test_irregular_healthy_stock_counts_without_shapes_or_virtual_loss(tmp_path,
 
 def test_unresolved_dirty_stock_is_pending_and_retained(tmp_path):
     result = optimize_preservation(trimesh.creation.box(), 100., {},
-        {"annotations": [defect()]}, tmp_path, resolution=16, time_limit=0)
+        {"annotations": [defect()]}, tmp_path, resolution=16, time_limit=0, closeout_seconds=0)
     assert result["saved_clean_material_ct"] == 0
     assert result["pending_further_separation_ct"] == pytest.approx(100-result["confirmed_defect_excluded_ct"])
     assert result["physical_retention_ct"] == 100
@@ -94,6 +94,7 @@ def test_preservation_api_reuses_inputs_and_stales_without_overwriting_legacy(se
     real = api.optimize_preservation
     def quick(*args, **kwargs):
         kwargs["time_limit"] = 0
+        kwargs["closeout_seconds"] = 0
         return real(*args, **kwargs)
     with patch.object(api, "optimize_preservation", side_effect=quick):
         response = client.post("/jobs/testjob/stone-preservation", json={})
@@ -104,6 +105,8 @@ def test_preservation_api_reuses_inputs_and_stales_without_overwriting_legacy(se
     assert result["mode"] == "stone_preservation" and result["reused_reconstruction"]
     assert result["target_status"] == "pending_separation"
     assert result["regions"][0]["mesh_file"].startswith("/files/testjob/stone_preservation/")
+    assert result["closeout_termination_reason"] == "disabled"
+    assert result["target_gap_before_closeout_ct"] == pytest.approx(result["target_weight_ct"])
     assert (job/"analysis_report.json").read_bytes() == legacy
     saved = read_json(job/"defect_review.json")
     saved["annotations"][0]["geometry"]["radii_mm"][0] = 2

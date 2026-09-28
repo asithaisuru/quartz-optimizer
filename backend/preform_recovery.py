@@ -181,7 +181,7 @@ def _envelope(points, pitch):
 
 def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                       *, resolution=56, beam_width=3, candidate_limit=60, time_limit=40.0,
-                      preservation=False, geometry_base=None):
+                      preservation=False, geometry_base=None, closeout_seconds=None):
     cfg = settings(request)
     recovery_metrics(rough_weight_ct, 0)
     if not isinstance(rough, trimesh.Trimesh) or not rough.is_watertight or abs(rough.volume) <= 0:
@@ -506,6 +506,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         # Confirmed safety mass is an overlapping exclusion, not removed material.
         piece = {
             "piece_id": "rough_piece_1", "region_id": "R1", "mesh": stock,
+            "defect_points": physical_defects,
             "weight_ct": rough_weight_ct, "confirmed_defect_loss_ct": defect_weight,
             "retained": True, "discard_reason": None,
             "physical_retained_weight_ct": rough_weight_ct - defect_weight,
@@ -525,6 +526,14 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         piece["usability"]["usability_status"] = "needs_further_separation"
         for row in physical["usability"]["nonusable_regions"]:
             row["usability_status"] = "needs_further_separation"
+    if preservation:
+        from stone_preservation_closeout import close_out
+        physical, closeout = close_out(physical, rough_weight_ct, defect_weight,
+            cfg, snapshot, scale, per_cell, half_diagonal, defect_points, safe_raw,
+            morphology, _envelope, seconds=closeout_seconds)
+        diagnostics.update(closeout)
+        if physical and physical["usability"]["usable_preform_weight_ct"] > 0:
+            best = (preservation_score(physical, physical["usability"]), physical)
     plan = physical["plan"] if best else None
     if physical:
         for piece in physical["pieces"].values():

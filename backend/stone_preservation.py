@@ -93,4 +93,7 @@ def optimize_preservation(rough, weight, request, snapshot, output, **kwargs):
             "Confirmed exclusion uses the existing conservative calibrated voxel safety model.",
             "Search is bounded; pending healthy material is retained, not waste.",
             "Physical cut verification is geometric; workshop validation remains required."])
+    result.update({key: result["diagnostics"][key] for key in (
+        "target_gap_before_closeout_ct", "target_gap_after_closeout_ct", "closeout_attempted",
+        "closeout_runtime_seconds", "closeout_states_explored", "closeout_cuts_added", "closeout_termination_reason")})
     return result
