@@ -25,6 +25,8 @@ scipy==1.15.3
 mapbox_earcut==2.0.0
 # Polygon operations used by trimesh.slice_mesh_plane(..., cap=True)
 shapely==2.1.2
+# Spawned optimizer processes with child-only BLAS/OpenMP environment limits.
+loky==3.6.0
 
 # Note: PyTorch and Rtree are installed via specific commands in README
 # to ensure GPU support and C++ bindings are correct.
