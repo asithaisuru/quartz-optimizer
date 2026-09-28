@@ -14,9 +14,24 @@ CUDA_VISIBLE_DEVICES_ENV = "CUDA_VISIBLE_DEVICES"
 RECONSTRUCTION_ENVIRONMENT_FILENAME = "reconstruction_environment.json"
 COLMAP_IMAGE_ORDER_FILENAME = "colmap_image_order.txt"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
-FEATURE_EXTRACTION_THREADS = 8
-FEATURE_MATCHING_THREADS = 8
-MAPPER_THREADS = 8
+REPRODUCIBLE_MODE_ENV = "RECONSTRUCTION_REPRODUCIBLE_MODE"
+LEGACY_SPARSE_THREADS = 8
+
+
+def _reproducible_mode(env=None):
+    """Reduce sparse nondeterminism; dense CUDA and Poisson remain unchanged."""
+    env = os.environ if env is None else env
+    value = str(env.get(REPRODUCIBLE_MODE_ENV, "true")).strip().lower()
+    if value in {"true", "1", "yes", "on"}:
+        return True
+    if value in {"false", "0", "no", "off"}:
+        return False
+    raise ValueError(f"{REPRODUCIBLE_MODE_ENV} must be true or false, got {value!r}")
+
+
+def _sparse_threads():
+    # Resolve at use time so the UI's loaded .env applies without import ordering.
+    return 1 if _reproducible_mode() else LEGACY_SPARSE_THREADS
 
 
 def _clean_executable_path(path):
@@ -215,7 +230,7 @@ def _feature_extractor_command(database_path, images_dir, image_list_path=None):
                 "--FeatureExtraction.num_threads",
                 "--SiftExtraction.num_threads",
             ),
-            str(FEATURE_EXTRACTION_THREADS),
+            str(_sparse_threads()),
         ),
         *_colmap_option_value(
             "feature_extractor",
@@ -249,7 +264,7 @@ def _exhaustive_matcher_command(database_path):
                 "--FeatureMatching.num_threads",
                 "--SiftMatching.num_threads",
             ),
-            str(FEATURE_MATCHING_THREADS),
+            str(_sparse_threads()),
         ),
         "--TwoViewGeometry.random_seed", "0",
         "--ExhaustiveMatching.block_size", "50",
@@ -264,7 +279,7 @@ def _mapper_command(database_path, images_dir, output_path, image_list_path):
         "--output_path", output_path,
         "--default_random_seed", "0",
         "--Mapper.random_seed", "0",
-        "--Mapper.num_threads", str(MAPPER_THREADS),
+        "--Mapper.num_threads", str(_sparse_threads()),
         "--Mapper.image_list_path", image_list_path,
     ]
 
@@ -277,10 +292,10 @@ def _hierarchical_mapper_command(
         "--image_path", images_dir,
         "--output_path", output_path,
         "--default_random_seed", "0",
-        "--num_threads", str(MAPPER_THREADS),
+        "--num_threads", str(_sparse_threads()),
         "--num_workers", "1",
         "--Mapper.random_seed", "0",
-        "--Mapper.num_threads", str(MAPPER_THREADS),
+        "--Mapper.num_threads", str(_sparse_threads()),
         "--Mapper.image_list_path", image_list_path,
     ]
 
@@ -494,7 +509,7 @@ def _reconstruction_settings():
     return {
         "feature_extraction": {
             "use_gpu": False,
-            "num_threads": FEATURE_EXTRACTION_THREADS,
+            "num_threads": _sparse_threads(),
             "default_random_seed": 0,
             "camera_model": "SIMPLE_RADIAL",
             "single_camera": True,
@@ -504,14 +519,14 @@ def _reconstruction_settings():
         },
         "feature_matching": {
             "use_gpu": False,
-            "num_threads": FEATURE_MATCHING_THREADS,
+            "num_threads": _sparse_threads(),
             "default_random_seed": 0,
             "two_view_geometry_random_seed": 0,
             "block_size": 50,
         },
         "mapper": {
             "random_seed": 0,
-            "num_threads": MAPPER_THREADS,
+            "num_threads": _sparse_threads(),
         },
         "image_undistorter": {"max_image_size": 800},
         "patch_match_stereo": {
@@ -547,10 +562,20 @@ def _write_reconstruction_environment(
         "gpu_name": gpu_metadata["gpu_name"],
         "cuda_version": gpu_metadata["cuda_version"],
         "gpu_driver_version": gpu_metadata["driver_version"],
+        "reproducibility": {
+            "configuration_environment_variable": REPRODUCIBLE_MODE_ENV,
+            "scope": "reproducibility-oriented sparse reconstruction configuration",
+            "full_pipeline_bitwise_deterministic": False,
+            "remaining_nondeterminism": [
+                "GPU PatchMatch", "automatic dense/fusion threads",
+                "Open3D Poisson automatic threads",
+            ],
+        },
         "sparse_execution": {
-            "feature_threads": FEATURE_EXTRACTION_THREADS,
-            "matching_threads": FEATURE_MATCHING_THREADS,
-            "mapper_threads": MAPPER_THREADS,
+            "reproducible_mode": _reproducible_mode(),
+            "feature_threads": _sparse_threads(),
+            "matching_threads": _sparse_threads(),
+            "mapper_threads": _sparse_threads(),
             "gpu_enabled": False,
             "random_seed": 0,
         },

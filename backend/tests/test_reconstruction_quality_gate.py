@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,12 @@ class ReconstructionQualityGateTests(unittest.TestCase):
         self.assertTrue(report["checks"]["watertight"]["passed"])
         self.assertEqual(report["metrics"]["non_manifold_edge_count"], 0)
         self.assertGreater(report["metrics"]["usable_sdf_volume"], 0)
+
+    def test_gate_loads_without_automatic_topology_processing(self):
+        with patch("reconstruction_quality.trimesh.load", wraps=trimesh.load) as load:
+            report = self._assess(trimesh.creation.box())
+        self.assertTrue(report["passed"])
+        self.assertEqual(load.call_args.kwargs, {"process": False})
 
     def test_open_mesh_fails_as_reconstruction_insufficient(self):
         mesh = trimesh.creation.box(extents=(10.0, 8.0, 6.0))

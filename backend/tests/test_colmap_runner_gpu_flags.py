@@ -50,6 +50,69 @@ def fake_help(command):
 
 
 class ColmapRunnerGpuFlagTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise the normal default even if the invoking shell opts out.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop(colmap_runner.REPRODUCIBLE_MODE_ENV, None)
+
+    def test_reproducible_mode_defaults_on_and_rejects_invalid_values(self):
+        self.assertTrue(colmap_runner._reproducible_mode({}))
+        for value in ("true", "1", "yes", "on", " TRUE "):
+            self.assertTrue(colmap_runner._reproducible_mode(
+                {colmap_runner.REPRODUCIBLE_MODE_ENV: value}))
+        for value in ("false", "0", "no", "off"):
+            self.assertFalse(colmap_runner._reproducible_mode(
+                {colmap_runner.REPRODUCIBLE_MODE_ENV: value}))
+        with self.assertRaises(ValueError):
+            colmap_runner._reproducible_mode(
+                {colmap_runner.REPRODUCIBLE_MODE_ENV: "maybe"})
+
+    def test_explicit_modes_control_all_sparse_commands_and_metadata(self):
+        for mode, threads in (("true", "1"), ("false", "8")):
+            with (
+                self.subTest(mode=mode),
+                patch.dict(os.environ, {colmap_runner.REPRODUCIBLE_MODE_ENV: mode}),
+                patch.object(colmap_runner, "_colmap_command_help", side_effect=fake_help),
+            ):
+                feature = colmap_runner._feature_extractor_command("db", "images", "order")
+                match = colmap_runner._exhaustive_matcher_command("db")
+                mapper = colmap_runner._mapper_command("db", "images", "sparse", "order")
+                hierarchy = colmap_runner._hierarchical_mapper_command(
+                    "db", "images", "sparse", "order")
+                for cmd, flag in (
+                    (feature, "--FeatureExtraction.num_threads"),
+                    (match, "--FeatureMatching.num_threads"),
+                    (mapper, "--Mapper.num_threads"),
+                    (hierarchy, "--Mapper.num_threads"),
+                    (hierarchy, "--num_threads"),
+                ):
+                    self.assertEqual(cmd[cmd.index(flag) + 1], threads)
+                    self.assertEqual(cmd[cmd.index("--default_random_seed") + 1], "0")
+                self.assertEqual(match[match.index("--TwoViewGeometry.random_seed") + 1], "0")
+                self.assertEqual(mapper[mapper.index("--Mapper.random_seed") + 1], "0")
+                self.assertEqual(hierarchy[hierarchy.index("--num_workers") + 1], "1")
+                settings = colmap_runner._reconstruction_settings()
+                for stage in ("feature_extraction", "feature_matching", "mapper"):
+                    self.assertEqual(settings[stage]["num_threads"], int(threads))
+                self.assertTrue(settings["patch_match_stereo"]["use_gpu"])
+                self.assertFalse(settings["patch_match_stereo"]["full_cuda_determinism"])
+                # Check persisted provenance for both default and intentional opt-out.
+                with tempfile.TemporaryDirectory() as tmp, patch.object(
+                    colmap_runner, "_gpu_runtime_metadata",
+                    return_value={"gpu_name": None, "cuda_version": None, "driver_version": None},
+                ):
+                    path = colmap_runner._write_reconstruction_environment(
+                        tmp, "missing-test-executable", "test", ["frame_0000.jpg"])
+                    with open(path, encoding="utf-8") as handle:
+                        metadata = colmap_runner.json.load(handle)
+                sparse = metadata["sparse_execution"]
+                self.assertEqual(sparse["reproducible_mode"], mode == "true")
+                for field in ("feature_threads", "matching_threads", "mapper_threads"):
+                    self.assertEqual(sparse[field], int(threads))
+                self.assertFalse(metadata["reproducibility"]["full_pipeline_bitwise_deterministic"])
+
     def test_colmap_env_removes_disable_all_cuda_mask_without_mutating_parent(self):
         with (
             patch.dict(os.environ, {colmap_runner.CUDA_VISIBLE_DEVICES_ENV: "-1"}),
@@ -174,8 +237,8 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         self.assertEqual(matcher_cmd[matcher_flag + 1], "0")
         feature_threads = feature_cmd.index("--FeatureExtraction.num_threads")
         matcher_threads = matcher_cmd.index("--FeatureMatching.num_threads")
-        self.assertEqual(feature_cmd[feature_threads + 1], "8")
-        self.assertEqual(matcher_cmd[matcher_threads + 1], "8")
+        self.assertEqual(feature_cmd[feature_threads + 1], "1")
+        self.assertEqual(matcher_cmd[matcher_threads + 1], "1")
         feature_seed = feature_cmd.index("--default_random_seed")
         matcher_seed = matcher_cmd.index("--default_random_seed")
         self.assertEqual(feature_cmd[feature_seed + 1], "0")
@@ -239,7 +302,7 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         self.assertIn("feature_extractor", str(err.exception))
         self.assertIn("max_image_size", str(err.exception))
 
-    def test_mappers_have_fixed_seed_balanced_threads_and_image_order(self):
+    def test_mappers_have_fixed_seed_reproducible_threads_and_image_order(self):
         cmd = colmap_runner._mapper_command(
             "db.db",
             "images",
@@ -254,7 +317,7 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
         )
 
         self.assertEqual(cmd[cmd.index("--Mapper.random_seed") + 1], "0")
-        self.assertEqual(cmd[cmd.index("--Mapper.num_threads") + 1], "8")
+        self.assertEqual(cmd[cmd.index("--Mapper.num_threads") + 1], "1")
         self.assertEqual(cmd[cmd.index("--default_random_seed") + 1], "0")
         self.assertEqual(
             cmd[cmd.index("--Mapper.image_list_path") + 1],
@@ -270,11 +333,11 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
             hierarchical_cmd[
                 hierarchical_cmd.index("--Mapper.num_threads") + 1
             ],
-            "8",
+            "1",
         )
         self.assertEqual(
             hierarchical_cmd[hierarchical_cmd.index("--num_threads") + 1],
-            "8",
+            "1",
         )
         self.assertEqual(
             hierarchical_cmd[hierarchical_cmd.index("--num_workers") + 1],
@@ -389,14 +452,15 @@ class ColmapRunnerGpuFlagTests(unittest.TestCase):
             metadata["reconstruction_settings"]["feature_extraction"][
                 "num_threads"
             ],
-            8,
+            1,
         )
         self.assertEqual(
             metadata["sparse_execution"],
             {
-                "feature_threads": 8,
-                "matching_threads": 8,
-                "mapper_threads": 8,
+                "reproducible_mode": True,
+                "feature_threads": 1,
+                "matching_threads": 1,
+                "mapper_threads": 1,
                 "gpu_enabled": False,
                 "random_seed": 0,
             },
