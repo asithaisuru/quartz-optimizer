@@ -7,7 +7,7 @@ import {
 
 describe('preform recovery settings', () => {
   it('uses the shared backend mode values', () => {
-    expect(OPTIMIZER_MODES).toEqual({ LEGACY: 'legacy_faceted_pack', PREFORM: 'preform_recovery' });
+    expect(OPTIMIZER_MODES).toEqual({ LEGACY: 'legacy_faceted_pack', PREFORM: 'preform_recovery', PRESERVATION: 'stone_preservation' });
   });
 
   it('defaults the expert-defined target to 85%', () => {

@@ -68,7 +68,7 @@ def passed_reconstruction(job):
     return weight, mesh_path, report
 
 
-def geometry_base(mesh_path, weight, report, cache_root, mesh_hash):
+def geometry_base(mesh_path, weight, report, cache_root, mesh_hash, *, resolution=None, bias=None):
     started = time.perf_counter()
     mesh = load_mesh_preserving_topology(mesh_path)
     # Input identity/topology checks only: do not re-run reconstruction or its
@@ -84,8 +84,8 @@ def geometry_base(mesh_path, weight, report, cache_root, mesh_hash):
     translation = -mesh.bounds.mean(axis=0)
     scale = millimetre_scale(mesh, weight)
     mesh.apply_translation(translation)
-    key = hashlib.sha256(json.dumps([mesh_hash, optimizer.SDF_RESOLUTION,
-        optimizer.SDF_BIAS_VOXELS, 3, "centered_sdf_v1"]).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps([mesh_hash, resolution or optimizer.SDF_RESOLUTION,
+        optimizer.SDF_BIAS_VOXELS if bias is None else bias, 3, "centered_sdf_v1"]).encode()).hexdigest()
     path = cache_root / (key + ".npz")
     hit = False
     try:
@@ -95,7 +95,8 @@ def geometry_base(mesh_path, weight, report, cache_root, mesh_hash):
                 raise ValueError("Invalid cached base geometry.")
             hit = True
     except (OSError, ValueError, KeyError, EOFError):
-        grid, origin, pitch = optimizer._build_sdf_grid(mesh)
+        grid, origin, pitch = optimizer._build_sdf_grid(mesh, **(
+            {"res": resolution, "bias_vox": bias} if resolution is not None else {}))
         cache_root.mkdir(parents=True, exist_ok=True)
         temporary = cache_root / (key + "." + uuid.uuid4().hex + ".tmp")
         try:
@@ -108,9 +109,9 @@ def geometry_base(mesh_path, weight, report, cache_root, mesh_hash):
         "hit": hit, "key": key, "geometry_base_seconds": time.perf_counter()-started}
 
 
-def _record(job, run, status):
+def _record(job, run, status, directory=DIRECTORY):
     errors = []
-    for path in (run / "status.json", job / DIRECTORY / "status.json"):
+    for path in (run / "status.json", job / directory / "status.json"):
         try:
             atomic_json(path, status)
         except OSError as exc:
@@ -251,8 +252,10 @@ def calculate(job, run, request, snapshot, weight, manifest, report):
             atomic_json(run / "failure.json", state)
 
 
-def create_router(validate_job):
-    router = APIRouter(tags=["defect-aware-faceted-optimization"])
+def create_router(validate_job, *, mode=MODE, directory=DIRECTORY,
+                  route="defect-aware-optimization", calculate_fn=calculate, settings_fn=settings):
+    MODE, DIRECTORY = mode, directory
+    router = APIRouter(tags=[route])
 
     def locate(job_id, run_id):
         job = Path(validate_job(job_id))
@@ -265,11 +268,11 @@ def create_router(validate_job):
             raise HTTPException(404, "Defect-aware optimization run not found.")
         return job, run
 
-    @router.post("/jobs/{job_id}/defect-aware-optimization", status_code=202)
+    @router.post(f"/jobs/{{job_id}}/{route}", status_code=202)
     def start(job_id: str, bg_tasks: BackgroundTasks, payload: dict = Body(default={})):
         job = Path(validate_job(job_id))
         try:
-            request = settings(payload, read_json(job / "job_config.json", {}))
+            request = settings_fn(payload, read_json(job / "job_config.json", {}))
             weight, mesh_path, quality = passed_reconstruction(job)
             with job_lock(job):
                 pointer = read_json(job / DIRECTORY / "status.json", {})
@@ -295,19 +298,19 @@ def create_router(validate_job):
                     "message": "Defect-aware faceted optimization queued.", "progress_percent": 0,
                     "worker_pid": os.getpid(), "created_at": now()}
                 try:
-                    _record(job, run, state)
+                    _record(job, run, state, directory=DIRECTORY)
                 except OSError:
                     state.update(status="failed", message="Unable to persist queued status; run again.")
                     atomic_json(run / "failure.json", state)
                     raise
-                bg_tasks.add_task(calculate, job, run, request, snapshot, weight, manifest, quality)
+                bg_tasks.add_task(calculate_fn, job, run, request, snapshot, weight, manifest, quality)
         except ValueError as exc:
             raise HTTPException(422, public_error(exc))
         except OSError as exc:
             raise HTTPException(503, public_error(exc))
         return {"run_id": run.name, "status": "queued", "reused_reconstruction": True}
 
-    @router.get("/jobs/{job_id}/defect-aware-optimization/latest")
+    @router.get(f"/jobs/{{job_id}}/{route}/latest")
     def latest(job_id: str):
         job = Path(validate_job(job_id))
         pointer = read_json(job / DIRECTORY / "status.json", {})
@@ -315,12 +318,12 @@ def create_router(validate_job):
             raise HTTPException(404, "No defect-aware optimization run exists.")
         return status(job_id, pointer["run_id"])
 
-    @router.get("/jobs/{job_id}/defect-aware-optimization/{run_id}/status")
+    @router.get(f"/jobs/{{job_id}}/{route}/{{run_id}}/status")
     def status(job_id: str, run_id: str):
         job, run = locate(job_id, run_id)
         return _status(job, run)
 
-    @router.get("/jobs/{job_id}/defect-aware-optimization/{run_id}/result")
+    @router.get(f"/jobs/{{job_id}}/{route}/{{run_id}}/result")
     def result(job_id: str, run_id: str):
         job, run = locate(job_id, run_id)
         if _status(job, run)["status"] != "completed":

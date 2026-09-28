@@ -11,6 +11,8 @@ import useExpertReview from '../hooks/useExpertReview';
 import ExpertReviewPanel from './ExpertReviewPanel';
 import DefectAwareOptimizationPanel from './DefectAwareOptimizationPanel';
 import useDefectAwareOptimization from '../hooks/useDefectAwareOptimization';
+import useStonePreservation from '../hooks/useStonePreservation';
+import StonePreservationPanel from './StonePreservationPanel';
 import {
   AWAITING_REVIEW_GUIDANCE, AWAITING_REVIEW_HEADLINE, CUT_SEQUENCE_LABEL,
   confirmedDefectFingerprint, defectAwareViewerPlan, gemMeshUrl,
@@ -20,7 +22,7 @@ import { downloadPdf, resolveBackendUrl } from '../utils/pdfDownload';
 import { validateGeometry } from '../utils/defectReview';
 import { resolveBackendResource } from '../utils/backendUrl';
 import { overlayOffset, readCoordinateFrame, viewerMeshFrame } from '../utils/coordinates';
-import { OPTIMIZER_MODES, OPTIMIZER_MODE_LABELS } from '../utils/preformRecovery';
+import { OPTIMIZER_MODES, OPTIMIZER_MODE_LABELS, normalizeResult } from '../utils/preformRecovery';
 import {
   Download, Layers, Box, Scale, Edit2, Check, X,
   Loader2, Sparkles, Copy, Hash, FileText, SunDim,
@@ -122,6 +124,7 @@ export default function ResultDashboard({
   // Reconstruction passed its quality gate and optimization was deferred
   // until Defect Review (job status `awaiting_defect_review`).
   awaitingDefectReview = false,
+  initialOptimizerMode = OPTIMIZER_MODES.PRESERVATION,
 }) {
   const [data,           setData]           = useState(null);
   const [selectedOption, setSelectedOption] = useState(null);
@@ -161,7 +164,7 @@ export default function ResultDashboard({
   // Viewer mode (Inspect / Defect Review / Cut Sequence) is lifted here so
   // the sidebar can show the matching Defect Review tools.
   const [viewerMode, setViewerMode] = useState('inspect');
-  const [optimizerMode, setOptimizerMode] = useState(OPTIMIZER_MODES.LEGACY);
+  const [optimizerMode, setOptimizerMode] = useState(initialOptimizerMode);
   const [selectedRegionId, setSelectedRegionId] = useState(null);
   const [selectedPieceId, setSelectedPieceId] = useState(null);
 
@@ -565,6 +568,7 @@ export default function ResultDashboard({
   // Spatial work uses each endpoint's own coordinate_frame, never the
   // selected legacy option's scale.
   const isPreformMode = optimizerMode === OPTIMIZER_MODES.PREFORM;
+  const isPreservationMode = optimizerMode === OPTIMIZER_MODES.PRESERVATION;
   const defectReview = useDefectReview({ apiUrl: API_URL, jobId });
   const canPlaceDefects = Boolean(overlayOffset(viewerMeshFrame(modelUrl), defectReview.frame));
   const isExpertMode = viewerMode === 'expert';
@@ -636,9 +640,18 @@ export default function ResultDashboard({
     [defectReview.review],
   );
   const defectAware = useDefectAwareOptimization({ apiUrl: API_URL, jobId, confirmedFingerprint });
+  const preservation = useStonePreservation({ apiUrl: API_URL, jobId, confirmedFingerprint, enabled: isPreservationMode });
+  const preservationView = useMemo(() => {
+    if (!preservation.result || preservation.result.stale) return null;
+    const view = normalizeResult(preservation.result);
+    return { ...view, regions: view.regions.map(region => ({ ...region,
+      resolvedUrl: resolveBackendResource(region.mesh_file, API_URL) })) };
+  }, [preservation.result]);
+  const viewerPreservation = isPreservationMode ? { active: true, label: 'Stone Preservation', result: preservationView,
+    selectedRegionId, onSelectRegion: setSelectedRegionId } : null;
   const defectAwareResult = defectAware.result;
   const defectAwareActive = Boolean(
-    !isPreformMode && defectAware.phase === 'completed' && defectAwareResult && !defectAwareResult.stale
+    !isPreservationMode && !isPreformMode && defectAware.phase === 'completed' && defectAwareResult && !defectAwareResult.stale
   );
   const defectAwareGems = useMemo(() => (defectAwareResult?.gems || []).map((gem, index) => ({
     ...gem,
@@ -682,7 +695,7 @@ export default function ResultDashboard({
     bladeKerfMm: setBladeKerfMm, preformMm: setPreformMarginMm, roughInsetMm: setRoughInsetMm,
     maxCutDepthMm: setMaxCutDepthMm, maxGems: setMaxGems, minGemCarat: setMinGemCarat,
   };
-  const showLegacyMetrics = !isPreformMode && !(awaitingDefectReview && !data);
+  const showLegacyMetrics = !isPreservationMode && !isPreformMode && !(awaitingDefectReview && !data);
 
   return (
     <div className="min-h-screen w-full flex flex-col overflow-auto lg:h-screen lg:flex-row lg:overflow-hidden">
@@ -691,24 +704,27 @@ export default function ResultDashboard({
       <div className="relative h-[56vh] min-h-[420px] w-full bg-black lg:h-full lg:min-h-0 lg:flex-1">
         <ModelViewer
           modelUrl={modelUrl}
-          cutUrl={defectAwareActive ? null : activeCutUrl}
-          defectsUrl={showFractures ? defectsUrl : null}
-          gemUrls={viewerGemUrls}
-          gemDetails={viewerGemDetails}
-          manufacturingPlan={defectAwareActive ? defectAwarePlan : manufacturingPlan}
-          remainingSpace={defectAwareActive ? null : remainingSpace}
+          cutUrl={isPreservationMode || defectAwareActive ? null : activeCutUrl}
+          defectsUrl={!isPreservationMode && showFractures ? defectsUrl : null}
+          gemUrls={isPreservationMode ? [] : viewerGemUrls}
+          gemDetails={isPreservationMode ? [] : viewerGemDetails}
+          manufacturingPlan={isPreservationMode ? preservation.result?.manufacturing_plan : defectAwareActive ? defectAwarePlan : manufacturingPlan}
+          remainingSpace={isPreservationMode || defectAwareActive ? null : remainingSpace}
           remainingSpaceDiagnostic={remainingSpaceDiagnostic}
-          activeStrategyName={defectAwareActive ? 'Defect-aware placement' : (data ? currentShape : null)}
-          activeGemCount={defectAwareActive ? defectAwareResult.gem_count : (data ? gemCount : null)}
-          sequenceLabel={defectAwareActive ? CUT_SEQUENCE_LABEL : null}
-          showConfirmedDefects={defectAwareActive && showConfirmedRegions}
+          activeStrategyName={isPreservationMode ? 'Stone Preservation' : defectAwareActive ? 'Defect-aware placement' : (data ? currentShape : null)}
+          activeGemCount={isPreservationMode ? null : defectAwareActive ? defectAwareResult.gem_count : (data ? gemCount : null)}
+          sequenceLabel={isPreservationMode ? 'Preservation cut sequence' : defectAwareActive ? CUT_SEQUENCE_LABEL : null}
+          showConfirmedDefects={isPreservationMode || (defectAwareActive && showConfirmedRegions)}
           gemFrame={defectAwareActive ? defectAwareFrame : null}
           selectedGemIndex={selectedGemIndex}
           onSelectGem={setSelectedGemIndex}
           viewerMode={viewerMode}
-          onViewerModeChange={setViewerMode}
+          onViewerModeChange={(mode) => {
+            if (mode === 'expert' && isPreservationMode) setOptimizerMode(OPTIMIZER_MODES.PREFORM);
+            setViewerMode(mode);
+          }}
           defectReview={viewerDefectReview}
-          preform={viewerPreform}
+          preform={viewerPreservation || viewerPreform}
           expertReview={viewerExpert}
         />
       </div>
@@ -720,7 +736,7 @@ export default function ResultDashboard({
         <div className="border-b border-slate-800 pb-4">
           <h2 className="text-2xl font-bold text-white mb-1">Analysis Report</h2>
           <p className="text-slate-400 text-sm">
-            {isPreformMode
+            {isPreservationMode ? 'Clean Material Recovery' : isPreformMode
               ? 'Preform Recovery Planning'
               : (awaitingDefectReview && !data ? 'Defect Review before gemstone placement' : 'Automated Yield Estimation')}
           </p>
@@ -744,7 +760,7 @@ export default function ResultDashboard({
               <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400" />
               <h3 className="font-semibold text-white">{AWAITING_REVIEW_HEADLINE}</h3>
             </div>
-            <p className="mt-1.5 text-xs leading-5 text-emerald-100/90">{AWAITING_REVIEW_GUIDANCE}</p>
+            <p className="mt-1.5 text-xs leading-5 text-emerald-100/90">{isPreservationMode ? 'Review confirmed defects, then calculate Stone Preservation using this reconstruction.' : AWAITING_REVIEW_GUIDANCE}</p>
             {viewerMode !== 'defects' && (
               <button
                 type="button"
@@ -784,7 +800,9 @@ export default function ResultDashboard({
         )}
 
         {/* DEFECT-AWARE GEM OPTIMIZATION — re-runs only placement + cuts */}
-        {jobId && !isPreformMode && (
+        {isPreservationMode && jobId && <StonePreservationPanel preservation={preservation}
+          ready={reconstructionReady && defectReview.availability === 'available'} onEditDefects={() => setViewerMode('defects')} />}
+        {jobId && !isPreformMode && !isPreservationMode && (
           <DefectAwareOptimizationPanel
             optimization={defectAware}
             confirmedCount={defectReview.review.summary.confirmed}
@@ -827,7 +845,7 @@ export default function ResultDashboard({
         )}
 
         {/* WEIGHT CARD */}
-        <div className="bg-gradient-to-br from-emerald-900/50 to-slate-900 p-5 rounded-xl border border-emerald-500/30 relative group">
+        {!isPreservationMode && <div className="bg-gradient-to-br from-emerald-900/50 to-slate-900 p-5 rounded-xl border border-emerald-500/30 relative group">
           <div className="flex items-center gap-3 mb-2">
             <Box className="w-5 h-5 text-emerald-400" />
             <span className="text-emerald-100 font-semibold">Rough Weight</span>
@@ -1030,13 +1048,14 @@ export default function ResultDashboard({
           </p>
         </div>
 
+        }
         {/* OPTIMIZER MODE */}
         <div>
           <h3 className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
             Optimizer mode
           </h3>
           <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Optimizer mode">
-            {[OPTIMIZER_MODES.LEGACY, OPTIMIZER_MODES.PREFORM].map((mode) => (
+            {[OPTIMIZER_MODES.PRESERVATION, OPTIMIZER_MODES.LEGACY, OPTIMIZER_MODES.PREFORM].map((mode) => (
               <button
                 key={mode} type="button" role="radio"
                 aria-checked={optimizerMode === mode}
@@ -1443,7 +1462,7 @@ export default function ResultDashboard({
             (hidden) in Preform Recovery mode so a running legacy search
             keeps reporting status. */}
         {jobId && (
-          <div className={isPreformMode ? 'hidden' : ''}>
+          <div className={isPreformMode || isPreservationMode ? 'hidden' : ''}>
             <ExtendedSearchPanel
               apiUrl={API_URL} jobId={jobId}
               onStatusChange={handleExtendedStatusChange}

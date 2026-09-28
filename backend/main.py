@@ -1882,6 +1882,7 @@ async def get_status(job_id: str):
             data["model_url"] = f"{API_BASE_URL}/files/{job_id}/dense/final_textured_model.ply"
             data["defect_review_url"] = f"/jobs/{job_id}/defect-review"
             data["defect_aware_optimization_url"] = f"/jobs/{job_id}/defect-aware-optimization"
+            data["stone_preservation_url"] = f"/jobs/{job_id}/stone-preservation"
 
         # Always expose the job_id so the frontend can offer a Resume button
         data["job_id"] = job_id
@@ -1909,3 +1910,5 @@ if hasattr(app, "router"):
     app.include_router(create_preform_router(_validated_job_folder, lambda: JOBS_DIR))
     from defect_aware_api import create_router as create_defect_aware_router
     app.include_router(create_defect_aware_router(_validated_job_folder))
+    from stone_preservation_api import create_router as create_preservation_router
+    app.include_router(create_preservation_router(_validated_job_folder))

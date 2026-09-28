@@ -538,7 +538,7 @@ function RegionMesh({ url, color, selected, muted, onSelect }) {
 function PreformRegions({ regions, selectedRegionId, onSelectRegion, muted }) {
   return regions.map((region, index) => {
     if (!region.resolvedUrl) return null;
-    const color = regionColor(index);
+    const color = region.preservation_status === 'needs_further_separation' ? '#94a3b8' : regionColor(index);
     const selected = selectedRegionId === region.region_id;
     const select = onSelectRegion ? () => onSelectRegion(selected ? null : region.region_id) : null;
     return (
@@ -721,7 +721,7 @@ export default function ModelViewer({
         : state === 'confirmed'))
     : [];
   const showDefectOverlays = Boolean(defectOffset) && (
-    defectMode || (inspectMode && preformActive)
+    defectMode || ((inspectMode || sequenceMode) && preformActive)
     || (showConfirmedDefects && !preformActive && (inspectMode || sequenceMode))
   );
   const canPlace = Boolean(reviewFrame && defectOffset);
@@ -769,7 +769,7 @@ export default function ModelViewer({
   );
 
   const showingLabel = preformActive
-    ? `Preform Recovery${preformResult ? ` · ${regions.length} region${regions.length === 1 ? '' : 's'}` : ' · no result yet'}`
+    ? `${preform?.label || 'Preform Recovery'}${preformResult ? ` · ${regions.length} physical region${regions.length === 1 ? '' : 's'}` : ' · no result yet'}`
     : activeStrategyName;
   // Stray reconstruction fragments inflate the bounding sphere, so keep the
   // plane indicator modest rather than spanning the full sphere.

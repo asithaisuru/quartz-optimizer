@@ -26,8 +26,10 @@ export default function PreformRegionDetails({ region, color, onClear }) {
         </button>
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[10px] leading-4">
-        <dt className="text-slate-500">Retained weight</dt>
-        <dd className="break-words font-mono text-white">{formatCt(region.retained_weight_ct)}</dd>
+        <dt className="text-slate-500">{region.preservation_status ? 'Healthy retained material' : 'Retained weight'}</dt>
+        <dd className="break-words font-mono text-white">{formatCt(region.healthy_weight_ct ?? region.retained_weight_ct)}</dd>
+        {region.preservation_status && <><dt className="text-slate-500">Preservation status</dt>
+          <dd className="text-white">{prettify(region.preservation_status)}</dd></>}
         <dt className="text-slate-500">Morphology</dt>
         <dd className="break-words text-white">{region.morphology ? prettify(region.morphology) : 'Not reported'}</dd>
         <dt className="text-slate-500">Suggested finish</dt>

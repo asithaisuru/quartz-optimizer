@@ -10,11 +10,13 @@ import { readCoordinateFrame } from './coordinates.js';
 import { toVec3 } from './defectReview.js';
 
 export const OPTIMIZER_MODES = {
+  PRESERVATION: 'stone_preservation',
   LEGACY: 'legacy_faceted_pack',
   PREFORM: 'preform_recovery',
 };
 
 export const OPTIMIZER_MODE_LABELS = {
+  [OPTIMIZER_MODES.PRESERVATION]: 'Stone Preservation',
   [OPTIMIZER_MODES.LEGACY]: 'Legacy Faceted Packing',
   [OPTIMIZER_MODES.PREFORM]: 'Preform Recovery',
 };

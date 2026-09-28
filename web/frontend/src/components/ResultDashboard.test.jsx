@@ -15,7 +15,9 @@ vi.mock('./ModelViewer', () => ({
   },
 }));
 
-const { default: ResultDashboard } = await import('./ResultDashboard');
+const { default: Dashboard } = await import('./ResultDashboard');
+// These existing assertions exercise the optional legacy comparison workflow.
+const ResultDashboard = (props) => <Dashboard initialOptimizerMode="legacy_faceted_pack" {...props} />;
 
 function renderDashboard(report, extraRoutes = {}) {
   installMockApi({
