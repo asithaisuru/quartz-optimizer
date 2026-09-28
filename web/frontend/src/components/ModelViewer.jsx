@@ -609,6 +609,16 @@ export default function ModelViewer({
   // Optional Expert Review state: backend physical leaf pieces (with a
   // safely resolved mesh URL and review state) plus the run's frame.
   expertReview = null,
+  // Optional: label shown on the Cut Sequence panel (e.g. when the plan is
+  // the defect-aware placement rather than the original optimization).
+  sequenceLabel = null,
+  // Optional: keep confirmed defect safety regions visible in Inspect and
+  // Cut Sequence alongside the gems (defect-aware placement).
+  showConfirmedDefects = false,
+  // Optional: coordinate frame (readCoordinateFrame) of centered-frame gem
+  // meshes and cut planes, e.g. a defect-aware result. They are offset once
+  // into the rough's frame like the other overlays. Null = legacy behaviour.
+  gemFrame = null,
 }) {
   const [internalMode, setInternalMode] = useState('inspect');
   const requestedMode = controlledMode ?? internalMode;
@@ -630,6 +640,7 @@ export default function ModelViewer({
   const defectOffset = overlayOffset(meshFrame, reviewFrame);
   const preformOffset = overlayOffset(meshFrame, resultFrame);
   const expertOffset = overlayOffset(meshFrame, expertReview?.frame || null);
+  const gemOffset = gemFrame ? overlayOffset(meshFrame, gemFrame) : [0, 0, 0];
 
   // In Preform Recovery mode the Cut Sequence steps through the result's
   // selected_verified cuts only (already ordered by `sequence`).
@@ -709,7 +720,10 @@ export default function ModelViewer({
         ? (defectReview.showRejected || state !== 'rejected')
         : state === 'confirmed'))
     : [];
-  const showDefectOverlays = Boolean(defectOffset) && (defectMode || (inspectMode && preformActive));
+  const showDefectOverlays = Boolean(defectOffset) && (
+    defectMode || (inspectMode && preformActive)
+    || (showConfirmedDefects && !preformActive && (inspectMode || sequenceMode))
+  );
   const canPlace = Boolean(reviewFrame && defectOffset);
   const pickingActive = Boolean(
     defectMode && draft?.placing && canPlace
@@ -921,6 +935,11 @@ export default function ModelViewer({
           <span className="inline-flex items-center gap-1"><span className="h-2 w-3 border border-slate-400" aria-hidden="true" /> Geometric comparison{showCandidateCuts ? '' : ' (hidden)'}</span>
         </div>
       )}
+      {gemFrame && !gemOffset && (
+        <div className="absolute bottom-16 left-4 z-20 max-w-[calc(100%-2rem)] rounded-lg border border-amber-500/40 bg-slate-950/90 px-2.5 py-1.5 text-[10px] leading-4 text-amber-300">
+          Gem and cut geometry cannot be placed: the result's coordinate frame does not match this viewer mesh.
+        </div>
+      )}
       {preformActive && preformResult && !preformOffset && (
         <div className="absolute bottom-16 left-4 z-20 max-w-[calc(100%-2rem)] rounded-lg border border-amber-500/40 bg-slate-950/90 px-2.5 py-1.5 text-[10px] leading-4 text-amber-300">
           Region and cut geometry cannot be placed: the result's coordinate frame does not match this viewer mesh.
@@ -929,6 +948,9 @@ export default function ModelViewer({
 
       {sequenceMode && activeStep && (
         <div className="absolute left-4 right-4 bottom-4 z-20 bg-slate-950/92 border border-slate-700 rounded-lg p-3">
+          {sequenceLabel && !preformActive && (
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">{sequenceLabel}</div>
+          )}
           <div className="flex items-center gap-2">
             <button
               onClick={() => { setIsPlaying(false); setStepIndex(0); }}
@@ -1030,6 +1052,7 @@ export default function ModelViewer({
                   })}
                 </group>
               )}
+              {gemOffset && (<group position={gemOffset}>
               {legacyInspect && showCut && (
                 hasIndividualGems ? (
                   inspectableGems.map((gem) => (
@@ -1052,6 +1075,8 @@ export default function ModelViewer({
                   activeStep={activeStep} marginMesh={marginMesh}
                 />
               ))}
+              {sequenceMode && activeStep && !preformActive && <CutOverlay step={activeStep} />}
+              </group>)}
               {/* Preform regions/cuts: centered frame, offset once to the rough's frame. */}
               {preformResult && preformOffset && (inspectMode || sequenceMode) && (
                 <group position={preformOffset}>
@@ -1094,10 +1119,8 @@ export default function ModelViewer({
               {legacyInspect && showRemainingSpace && remainingComponent && (
                 <RemainingSpaceEnvelope component={remainingComponent} />
               )}
-              {sequenceMode && activeStep && (
-                preformActive
-                  ? (preformOffset && <group position={preformOffset}><CutOverlay step={activeStep} /></group>)
-                  : <CutOverlay step={activeStep} />
+              {sequenceMode && activeStep && preformActive && preformOffset && (
+                <group position={preformOffset}><CutOverlay step={activeStep} /></group>
               )}
               {sequenceMode && <axesHelper args={[0.42]} />}
             </group>

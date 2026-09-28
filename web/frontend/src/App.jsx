@@ -5,8 +5,16 @@ import PipelineHUD from './components/PipelineHUD';
 import CalculationProgressPanel from './components/CalculationProgressPanel';
 import ResultDashboard from './components/ResultDashboard';
 import { AlertTriangle, RefreshCw, Plus } from 'lucide-react';
+import { isAwaitingDefectReview } from './utils/defectAwareOptimization';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+// Viewer mesh for a job that stopped at `awaiting_defect_review` when the
+// status payload does not carry model_url (the backend only builds it for
+// Completed jobs today). Same file the backend serves as the default.
+const reconstructionModelUrl = (data, jobId) => (
+  data?.model_url || (jobId ? `${API_URL}/files/${encodeURIComponent(jobId)}/dense/final_textured_model.ply` : null)
+);
 
 const pdfStateFromStatus = (data = {}) => ({
   available: Boolean(data.pdf_report_available),
@@ -20,6 +28,9 @@ function App() {
   const [jobId,      setJobId]      = useState(null);
   const [statusData, setStatusData] = useState({ step: '', progress: 0, message: '' });
   const [failReason, setFailReason] = useState('');
+  // Reconstruction finished (quality PASS); gemstone optimization deferred
+  // until the user reviews defects. A success state, never a failure.
+  const [awaitingDefectReview, setAwaitingDefectReview] = useState(false);
 
   const [modelUrl,    setModelUrl]    = useState(null);
   const [reportUrl,   setReportUrl]   = useState(null);
@@ -53,6 +64,7 @@ function App() {
     setCutMode(mode);
     setAppState('processing');
     setFailReason('');
+    setAwaitingDefectReview(false);
     setPdfReport(pdfStateFromStatus());
 
     const formData = new FormData();
@@ -70,6 +82,9 @@ function App() {
     formData.append("source_folder",   sourceFolder);
     if (shape)       formData.append("preferred_shape", shape);
     formData.append("cut_mode",       mode);
+    // Reconstruct once, then stop for Defect Review; gem placement and cut
+    // sequence are calculated afterwards via defect-aware optimization.
+    formData.append("defer_optimization_until_defect_review", "true");
     Object.entries(optimizerSettings).forEach(([key, value]) => {
       if (value !== undefined && value !== null && value !== "") {
         formData.append(key, value);
@@ -101,7 +116,11 @@ function App() {
       const res  = await axios.get(`${API_URL}/jobs/${id}/status`);
       const data = res.data;
 
-      if (data.status === 'Completed') {
+      if (isAwaitingDefectReview(data)) {
+        enterAwaitingDefectReview(data, id);
+
+      } else if (data.status === 'Completed') {
+        setAwaitingDefectReview(false);
         setModelUrl(data.model_url   || null);
         setReportUrl(data.report_url || null);
         setCutUrl(data.cut_url       || null);
@@ -130,6 +149,19 @@ function App() {
     }
   };
 
+  const enterAwaitingDefectReview = (data, id) => {
+    setModelUrl(reconstructionModelUrl(data, id));
+    setReportUrl(data.report_url || null);
+    setCutUrl(data.cut_url || null);
+    setDefectsUrl(data.defects_url || null);
+    setResultAssetBaseUrl(data.result_asset_base_url || null);
+    setEffectiveResultId(data.effective_result_id || null);
+    setEffectiveReportHash(data.effective_report_hash || null);
+    setPdfReport(pdfStateFromStatus(data));
+    setAwaitingDefectReview(true);
+    setAppState('completed');
+  };
+
   const handleCancel = async () => {
     if (!jobId) return;
     if (confirm("Are you sure you want to stop the analysis?")) {
@@ -154,6 +186,7 @@ function App() {
     setAppState('idle');
     setJobId(null);
     setFailReason('');
+    setAwaitingDefectReview(false);
     setModelUrl(null);
     setReportUrl(null);
     setCutUrl(null);
@@ -184,7 +217,12 @@ function App() {
           message:  data.message,
         });
 
-        if (data.status === "Completed") {
+        if (isAwaitingDefectReview(data)) {
+          enterAwaitingDefectReview(data, jobId);
+          clearInterval(interval);
+
+        } else if (data.status === "Completed") {
+          setAwaitingDefectReview(false);
           setModelUrl(data.model_url);
           if (data.report_url)  setReportUrl(data.report_url);
           if (data.cut_url)     setCutUrl(data.cut_url);
@@ -309,6 +347,7 @@ function App() {
           pdfReportError={pdfReport.error}
           initialShape={preferredShape}
           initialCutMode={cutMode}
+          awaitingDefectReview={awaitingDefectReview}
         />
       )}
     </div>

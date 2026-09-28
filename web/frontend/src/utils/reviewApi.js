@@ -85,3 +85,23 @@ export const patchExpertPiece = (apiUrl, jobId, runId, pieceId, body) =>
 
 export const fetchPreformResult = (apiUrl, jobId) =>
   axios.get(`${base(apiUrl, jobId)}/preform-recovery/result`).then(unwrap);
+
+// Defect-aware faceted gem optimization — reuses the reconstruction:
+//   POST /jobs/{id}/defect-aware-optimization
+//   GET  /jobs/{id}/defect-aware-optimization/latest
+//   GET  /jobs/{id}/defect-aware-optimization/{run_id}/status
+//   GET  /jobs/{id}/defect-aware-optimization/{run_id}/result
+const defectAwareBase = (apiUrl, jobId) => `${base(apiUrl, jobId)}/defect-aware-optimization`;
+
+export const startDefectAwareOptimization = (apiUrl, jobId, body) =>
+  axios.post(defectAwareBase(apiUrl, jobId), body).then(unwrap);
+
+// Status of the job's most recent run (404 when none exists yet).
+export const fetchDefectAwareLatest = (apiUrl, jobId) =>
+  axios.get(`${defectAwareBase(apiUrl, jobId)}/latest`).then(unwrap);
+
+export const fetchDefectAwareStatus = (apiUrl, jobId, runId) =>
+  axios.get(`${defectAwareBase(apiUrl, jobId)}/${encodeURIComponent(runId)}/status`).then(unwrap);
+
+export const fetchDefectAwareResult = (apiUrl, jobId, runId) =>
+  axios.get(`${defectAwareBase(apiUrl, jobId)}/${encodeURIComponent(runId)}/result`).then(unwrap);
