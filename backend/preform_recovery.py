@@ -180,7 +180,8 @@ def _envelope(points, pitch):
 
 
 def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
-                      *, resolution=56, beam_width=3, candidate_limit=60, time_limit=40.0):
+                      *, resolution=56, beam_width=3, candidate_limit=60, time_limit=40.0,
+                      preservation=False, geometry_base=None):
     cfg = settings(request)
     recovery_metrics(rough_weight_ct, 0)
     if not isinstance(rough, trimesh.Trimesh) or not rough.is_watertight or abs(rough.volume) <= 0:
@@ -191,7 +192,12 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
     annotations = confirmed_annotations(snapshot)
     target_constrained = any(a["type"] in {"fracture", "inclusion"} for a in annotations)
     started = time.monotonic()
-    grid, origin, pitch = _build_sdf_grid(rough, res=resolution, bias_vox=0.5)
+    grid, origin, pitch = (geometry_base if geometry_base is not None else
+                          _build_sdf_grid(rough, res=resolution, bias_vox=0.5))
+    classify = evaluate_usability
+    if preservation:
+        from stone_preservation import classify_preservation, preservation_score
+        classify = classify_preservation
     raw = grid > 0
     original_count = int(raw.sum())
     if original_count == 0:
@@ -244,6 +250,10 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         "topology": topology, "search_trace": trace,
         "morphology_limitations": "Geometric advisory classification; physical utility is not workshop validated.",
     }
+    if preservation:
+        from optimizer_parallel import configuration
+        diagnostics["performance"] = {**configuration(), "optimizer_worker_count": 1,
+            "manufacturing_seconds": 0.0}
     initial = [np.arange(len(points))]
     best = None
     uncut_physical = None
@@ -262,7 +272,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         counts = diagnostics["manufacturing_rejections"]
         counts[reason] = counts.get(reason, 0) + 1
 
-    def assess(chunks, uncut=False, preferred_normal=None):
+    def assess(chunks, uncut=False, preferred_normal=None, preverified=None):
         nonlocal best, uncut_physical, whole_validation, assessment_unusable
         assessment_unusable = set()
         trace["states_explored"] += 1
@@ -290,7 +300,8 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         remaining = min(time_limit, search_deadline) - (time.monotonic() - started)
         if remaining <= 0:
             return (0.0, -len(chunks))
-        plan = plan_cut_sequence(
+        verification_started = time.monotonic()
+        plan = preverified if preverified is not None else plan_cut_sequence(
             rough, envelopes, blade_kerf_mm=cfg["blade_kerf_mm"],
             preform_margin_mm=cfg["preform_mm"], max_cut_depth_mm=cfg["max_cut_depth_mm"],
             mm_per_mesh_unit=scale, pitch=pitch, time_limit_seconds=min(1.5 if search_stage == "defect" else 3.0, remaining),
@@ -298,6 +309,8 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
             gem_ids=[f"G{i + 1}" for i in range(len(envelopes))],
             defect_points=defect_points, defect_radius_mesh=half_diagonal,
             preferred_normals=[] if preferred_normal is None else [preferred_normal])
+        if preservation and preverified is None:
+            diagnostics["performance"]["manufacturing_seconds"] += time.monotonic()-verification_started
         if plan["status"] not in {"complete", "no_separation_required"}:
             for reason, count in plan.get("rejection_reasons", {}).items():
                 counts = diagnostics["manufacturing_rejections"]
@@ -311,7 +324,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
             physical = evaluate_plan(
                 stock, plan, rough_weight_ct, physical_defects, per_cell,
                 cfg["blade_kerf_mm"] / scale, cfg["min_secondary_carat"], half_diagonal)
-            physical["usability"] = evaluate_usability(physical, cfg, scale, morphology)
+            physical["usability"] = classify(physical, cfg, scale, morphology)
             if uncut:
                 whole_validation = validate_region(
                     {"mesh":stock,"weight_ct":rough_weight_ct,"confirmed_defect_loss_ct":defect_weight,
@@ -319,6 +332,8 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                     manufacturing_valid=True)
                 whole_validation["assessment"] = "entire_unmodified_physical_stock_after_canonical_consolidation"
                 whole_validation["physical_piece_count"] = len(physical["pieces"])
+                if preservation:
+                    whole_validation = {**whole_validation, **next(iter(physical["pieces"].values()))["usability"]}
                 # No-cut credit belongs only to the entire original physical piece.
                 if len(physical["pieces"]) != 1:
                     raise ValueError("Uncut stock must remain one physical piece.")
@@ -349,7 +364,9 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
             if physical["usability"]["usable_preform_weight_ct"] != 0:
                 raise ValueError("Unusable uncut stock cannot credit candidate lobes.")
         usable_weight = physical["usability"]["usable_preform_weight_ct"]
-        if target_constrained:
+        if preservation:
+            score = preservation_score(physical, physical["usability"])
+        elif target_constrained:
             score = defect_constrained_plan_score(physical, physical["usability"])
         else:
             score = plan_score(physical, physical["usability"])
@@ -368,9 +385,11 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
     assess(initial, uncut=True)
     frontier = [(initial, assessment_unusable)] if len(points) >= 4 else []
     _, rough_axes = np.linalg.eigh(np.cov(points.T))
-    phases = ([("defect", min(2, cfg["max_regions"] - 1), time_limit * .65)]
+    phases = ([("defect", cfg["max_regions"] - 1 if preservation else min(2, cfg["max_regions"] - 1),
+                time_limit if preservation else time_limit * .65)]
               if annotations else [])
-    phases.append(("generic", cfg["max_regions"] - 1, time_limit))
+    if not preservation:
+        phases.append(("generic", cfg["max_regions"] - 1, time_limit))
     for search_stage, depth_limit, search_deadline in phases:
         phase_started = time.monotonic()
         if search_stage == "generic" and annotations:
@@ -433,14 +452,32 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                 # every first-level quantile before reaching depth two.
                 per_state = (4 if depth == 0 else 2) if search_stage == "defect" else (6 if depth == 0 else 4)
                 trace["states_pruned"] += max(0,len(proposals)-per_state)
-                for _,index,left,right,normal,kind in proposals[:per_state]:
+                chosen = proposals[:min(per_state, max(0, candidate_limit-diagnostics["candidates_tested"]))]
+                verified_plans = [None]*len(chosen)
+                remaining = search_deadline-(time.monotonic()-started)
+                if preservation and len(chosen) > 1 and remaining > 5:
+                    from stone_preservation_parallel import verify_batch
+                    arguments = []
+                    try:
+                        for _, index, left, right, normal, kind in chosen:
+                            proposed = chunks[:index]+[left,right]+chunks[index+1:]
+                            envelopes = [_envelope(points[c[safe_raw[c]]] if safe_raw[c].sum() >= 4 else points[c], pitch) for c in proposed]
+                            arguments.append((rough, envelopes, dict(blade_kerf_mm=cfg["blade_kerf_mm"],
+                                preform_margin_mm=cfg["preform_mm"], max_cut_depth_mm=cfg["max_cut_depth_mm"],
+                                mm_per_mesh_unit=scale, pitch=pitch, time_limit_seconds=min(1.5, remaining),
+                                gem_values=[len(c)*per_cell for c in proposed], gem_ids=[f"G{i+1}" for i in range(len(proposed))],
+                                defect_points=defect_points, defect_radius_mesh=half_diagonal, preferred_normals=[normal])))
+                        verified_plans = verify_batch(arguments, diagnostics.setdefault("performance", {}))
+                    except (QhullError, ValueError, ZeroDivisionError):
+                        pass  # The ordinary assessment rejects invalid envelopes.
+                for proposal_index, (_,index,left,right,normal,kind) in enumerate(chosen):
                     if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= search_deadline:
                         break
                     candidate = chunks[:index]+[left,right]+chunks[index+1:]
                     diagnostics["candidates_tested"] += 1
                     trace["candidate_kinds"][kind] = trace["candidate_kinds"].get(kind,0)+1
                     trace["evaluation_order"].append(kind)
-                    score = assess(candidate, preferred_normal=normal)
+                    score = assess(candidate, preferred_normal=normal, preverified=verified_plans[proposal_index])
                     successors.append((score,candidate,assessment_unusable.copy()))
                 if diagnostics["candidates_tested"] >= candidate_limit or time.monotonic()-started >= search_deadline:
                     break
@@ -454,6 +491,11 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
         "time_limit" if time.monotonic()-started >= time_limit else
         "candidate_limit" if diagnostics["candidates_tested"] >= candidate_limit else
         "region_depth_limit" if frontier and cfg["max_regions"] > 1 else "queue_exhausted")
+    if preservation:
+        performance = diagnostics["performance"]
+        performance["candidate_count"] = diagnostics["candidates_tested"]
+        performance["search_seconds"] = time.monotonic()-started
+        performance["manufacturing_seconds"] += performance["parallel_evaluation_seconds"]
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -479,7 +521,7 @@ def optimize_preforms(rough, rough_weight_ct, request, snapshot, output_dir,
                 rough_weight_ct, retained=rough_weight_ct - defect_weight,
                 defects=defect_weight),
         }
-        physical["usability"] = evaluate_usability(physical, cfg, scale, morphology)
+        physical["usability"] = classify(physical, cfg, scale, morphology)
         piece["usability"]["usability_status"] = "needs_further_separation"
         for row in physical["usability"]["nonusable_regions"]:
             row["usability_status"] = "needs_further_separation"

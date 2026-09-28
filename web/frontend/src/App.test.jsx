@@ -61,10 +61,10 @@ describe('App upload + deferred optimization', () => {
     fireEvent.click(screen.getByText('upload'));
     expect(await screen.findByText('3D Reconstruction Complete')).toBeTruthy();
     expect(screen.getByText(
-      'Review AI candidates or add manual inclusions/fractures, then calculate gemstone placement.',
+      'Review confirmed defects, then calculate Stone Preservation using this reconstruction.',
     )).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Review Defects' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Calculate Gems & Cut Sequence/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Calculate Stone Preservation' })).toBeTruthy();
     expect(screen.queryByText('Pipeline Interrupted')).toBeNull();
     expect(screen.queryByText(/Resume from Checkpoint/)).toBeNull();
     expect(screen.queryByText(/FAILED/)).toBeNull();

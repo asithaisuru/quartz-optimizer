@@ -138,7 +138,7 @@ def status_response(status):
     return value
 
 
-def canonical_result(result, job, run):
+def canonical_result(result, job, run, *, directory="preform_recovery"):
     """Serialize public physical fields without changing the verified internal plan."""
     value = copy.deepcopy(result)
     frame = value["coordinate_frame"]
@@ -188,7 +188,7 @@ def canonical_result(result, job, run):
         resource = run / (region_id + ".ply")
         if not resource.resolve().is_relative_to(run.resolve()) or not resource.is_file():
             raise ValueError("Retained region mesh artifact is unavailable.")
-        region["mesh_file"] = f"/files/{job.name}/preform_recovery/{run.name}/{region_id}.ply"
+        region["mesh_file"] = f"/files/{job.name}/{directory}/{run.name}/{region_id}.ply"
     return value
 
 
@@ -290,7 +290,13 @@ def create_router(validate_job, jobs_root=None):
     def modes():
         return {
             "default": "legacy_faceted_pack",
-            "optimization_modes": ["legacy_faceted_pack", "preform_recovery"],
+            "workflow_default": "stone_preservation",
+            "expert_recovery_mode": "stone_preservation",
+            "optimization_modes": ["legacy_faceted_pack", "preform_recovery", "defect_aware_faceted_pack", "stone_preservation"],
+            "stone_preservation": {"endpoint": "/jobs/{job_id}/stone-preservation",
+                                    "metric": "clean_material_recovery_percent"},
+            "defect_aware_faceted_pack": {"endpoint": "/jobs/{job_id}/defect-aware-optimization",
+                                          "metric": "faceted_yield_percent"},
             "legacy_faceted_pack": {"endpoint": "/jobs/{job_id}/recalculate",
                                     "metric": "legacy_faceted_yield_percent",
                                     "existing_metric": "yield_percent"},
