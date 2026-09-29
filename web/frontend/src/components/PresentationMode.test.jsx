@@ -127,11 +127,89 @@ describe('presentation mode navigation', () => {
     expect(screen.queryByText('Hide Fractures / Clouds')).toBeNull();
   });
 
-  it('hides the old PDF report download but keeps the PLY model download', async () => {
+  it('hides the old analysis PDF but keeps the PLY model download', async () => {
     renderDashboard({ routes: withResult() });
     await screen.findByLabelText('Final gemstone result');
     expect(screen.queryByText('Download PDF Report')).toBeNull();
     expect(screen.getByText('Download .PLY Model')).toBeTruthy();
+  });
+});
+
+describe('Final Gemstone Report', () => {
+  const pdfResponse = () => ({
+    ok: true,
+    headers: { get: (name) => (name.toLowerCase() === 'content-type' ? 'application/pdf' : '') },
+    // jsdom's Blob has no arrayBuffer(); a minimal PDF-signed blob stand-in.
+    blob: async () => ({ size: 24, slice: () => ({ arrayBuffer: async () => new TextEncoder().encode('%PDF-').buffer }) }),
+  });
+  let fetchMock;
+  beforeEach(() => {
+    fetchMock = vi.fn(async () => pdfResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    URL.createObjectURL = vi.fn(() => 'blob:report');
+    URL.revokeObjectURL = vi.fn();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const reportButton = () => screen.getByRole('button', { name: 'Download Final Gemstone Report' });
+
+  it('is shown below the result card and downloads the current run’s report', async () => {
+    renderDashboard({ routes: withResult() });
+    await screen.findByLabelText('Final gemstone result');
+    const button = reportButton();
+    expect(button.disabled).toBe(false);
+    expect(finalPanel().compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /Report/ })).toHaveLength(1);
+    fireEvent.click(button);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:8000/jobs/job1/defect-aware-optimization/run1/report.pdf');
+
+    await waitFor(() => expect(URL.createObjectURL).toHaveBeenCalled());
+  });
+
+  it('is disabled before a final result exists', async () => {
+    renderDashboard({ routes: { 'GET /jobs/job1/defect-review': review([]) } });
+    await screen.findByText('No final gemstone calculation yet.');
+    expect(reportButton().disabled).toBe(true);
+    expect(screen.getByTestId('final-report-hint').textContent).toBe('Calculate Final Gemstones to create the report.');
+  });
+
+  it('is disabled for a stale result with the recalculate message', async () => {
+    renderDashboard({ routes: withResult({ ...RESULT, stale: true }) });
+    await screen.findByText(/Confirmed defects changed\./);
+    expect(reportButton().disabled).toBe(true);
+    expect(screen.getByTestId('final-report-hint').textContent)
+      .toBe('Recalculate Final Gemstones before downloading the report.');
+    fireEvent.click(reportButton());
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('follows a new run: the report URL switches to the recalculated run', async () => {
+    renderDashboard({
+      routes: {
+        ...withResult(),
+        'POST /jobs/job1/defect-aware-optimization': { run_id: 'run2', status: 'completed' },
+        'GET /jobs/job1/defect-aware-optimization/run2/result': { ...RESULT, run_id: 'run2', total_gem_weight_ct: 60 },
+      },
+    });
+    await screen.findByLabelText('Final gemstone result');
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate Final Gemstones' }));
+    await waitFor(() => expect(metric('final-gem-weight')).toBe('60.00 ct'));
+    fireEvent.click(reportButton());
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0][0]).toContain('/defect-aware-optimization/run2/report.pdf');
+  });
+
+  it('shows the backend error if the report is refused', async () => {
+    fetchMock.mockImplementation(async () => ({
+      ok: false, status: 409,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ detail: 'Recalculate Final Gemstones before downloading the report.' }),
+    }));
+    renderDashboard({ routes: withResult() });
+    await screen.findByLabelText('Final gemstone result');
+    fireEvent.click(reportButton());
+    expect((await screen.findByText('Recalculate Final Gemstones before downloading the report.')).getAttribute('role')).toBe('alert');
   });
 });
 

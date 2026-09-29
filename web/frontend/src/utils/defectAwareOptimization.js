@@ -73,6 +73,17 @@ export const FINAL_STALE_MESSAGE = 'Confirmed defects changed.';
 export const FINAL_STALE_ACTION = 'Recalculate gemstone placement.';
 export const FINAL_CUT_SEQUENCE_LABEL = 'Cut sequence for final gemstone placement';
 export const FINAL_PLACEMENT_LABEL = 'Final gemstone placement';
+export const FINAL_REPORT_LABEL = 'Download Final Gemstone Report';
+export const FINAL_REPORT_STALE_MESSAGE = 'Recalculate Final Gemstones before downloading the report.';
+export const FINAL_REPORT_PENDING_MESSAGE = 'Calculate Final Gemstones to create the report.';
+export const FINAL_REPORT_EMPTY_MESSAGE = 'No final gemstone plan to report.';
+
+// Final Gemstone Planning Report of one run (built from that run's result only).
+export function finalReportUrl(apiUrl, jobId, runId) {
+  if (!jobId || !runId) return null;
+  const base = String(apiUrl || '').replace(/\/+$/, '');
+  return `${base}/jobs/${encodeURIComponent(jobId)}/defect-aware-optimization/${encodeURIComponent(runId)}/report.pdf`;
+}
 
 // Display summary of one defect-aware result. Every value is the backend's
 // own number except the clean-basis pair, which only re-expresses them:

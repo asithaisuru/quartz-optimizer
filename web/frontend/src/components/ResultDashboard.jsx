@@ -14,6 +14,7 @@ import useDefectAwareOptimization from '../hooks/useDefectAwareOptimization';
 import useStonePreservation from '../hooks/useStonePreservation';
 import StonePreservationPanel from './StonePreservationPanel';
 import FinalGemstonePanel from './FinalGemstonePanel';
+import FinalReportButton from './FinalReportButton';
 import {
   AWAITING_REVIEW_GUIDANCE, AWAITING_REVIEW_HEADLINE, CUT_SEQUENCE_LABEL,
   FINAL_CUT_SEQUENCE_LABEL, FINAL_PLACEMENT_LABEL,
@@ -833,6 +834,7 @@ export default function ResultDashboard({
             />
           )}
           {viewerMode === 'defects' ? defectReviewPanel : (<>
+            {jobId && <FinalReportButton optimization={defectAware} apiUrl={API_URL} jobId={jobId} />}
             {defectReview.availability === 'available' && (
               <label className="-mt-2 flex items-center gap-2 text-xs text-slate-300">
                 <input
@@ -1540,8 +1542,8 @@ export default function ResultDashboard({
 
         {/* ACTIONS */}
         <div className="mt-auto pt-4 border-t border-slate-800 space-y-3">
-          {/* The PDF is the older analysis report, not the final-gem result:
-              hidden in presentation mode until it is regenerated from it. */}
+          {/* Legacy analysis PDF (developer mode only). Presentation mode offers
+              the Final Gemstone Report of the current run instead. */}
           {!presentationMode && (<>
           <button
             onClick={handleDownloadReport}

@@ -11,18 +11,24 @@ from pathlib import Path
 import numpy as np
 import trimesh
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
+from fastapi.responses import FileResponse
 
 import optimizer
 from cut_sequence import plan_cut_sequence
 from defect_aware_geometry import ConfirmedGeometry, constraint_hash, millimetre_scale
 from defect_review import atomic_json, finite, now, read_json, review
+from final_gem_report import REPORT_VERSION, create_final_gem_pdf
 from mesh_artifacts import load_mesh_preserving_topology
 from preform_api import input_metadata, job_lock, process_alive, public_error
+from report_generator import is_valid_pdf
 from yield_calculator import _build_gem_details
 from optimizer_parallel import configuration
 
 MODE = "defect_aware_faceted_pack"
 DIRECTORY = "defect_aware_optimization"
+FINAL_GEM_MODE = MODE  # the only mode whose runs get a Final Gemstone Report
+REPORT_FILENAME = "final_gem_report.pdf"
+REPORT_CACHE_FILENAME = "final_gem_report_cache.json"
 DEFAULTS = {"blade_kerf_mm": .5, "preform_mm": .5, "rough_inset_mm": .8,
             "max_cut_depth_mm": 100., "max_gems": 12, "min_secondary_carat": .5}
 ALIASES = {"preform_mm": "preform_margin_mm", "rough_inset_mm": "rough_clearance_mm"}
@@ -323,22 +329,75 @@ def create_router(validate_job, *, mode=MODE, directory=DIRECTORY,
         job, run = locate(job_id, run_id)
         return _status(job, run)
 
-    @router.get(f"/jobs/{{job_id}}/{route}/{{run_id}}/result")
-    def result(job_id: str, run_id: str):
-        job, run = locate(job_id, run_id)
+    def completed_result(job, run):
         if _status(job, run)["status"] != "completed":
             raise HTTPException(409, "Defect-aware optimization has not completed.")
         saved = read_json(run / "result.json")
         if saved is None:
             raise HTTPException(409, "Completed result artifact is unavailable.")
-        try:
-            weight, mesh_path, _ = passed_reconstruction(job)
-            stale = (constraint_hash(review(job)) != saved["defect_review_sha256"] or
-                     sha256(mesh_path) != saved["input_manifest"]["mesh_sha256"] or
-                     weight != saved["rough_weight_ct"])
-        except (ValueError, OSError):
-            stale = True
-        saved["stale"] = stale
         return saved
 
+    @router.get(f"/jobs/{{job_id}}/{route}/{{run_id}}/result")
+    def result(job_id: str, run_id: str):
+        job, run = locate(job_id, run_id)
+        saved = completed_result(job, run)
+        saved["stale"] = _is_stale(job, saved)
+        return saved
+
+    if mode == FINAL_GEM_MODE:
+        # Final Gemstone Planning Report: only for the defect-aware (final-gem)
+        # mode, never for routers that reuse this factory for other modes.
+        @router.get(f"/jobs/{{job_id}}/{route}/{{run_id}}/report.pdf")
+        def report_pdf(job_id: str, run_id: str):
+            job, run = locate(job_id, run_id)
+            saved = completed_result(job, run)
+            if _is_stale(job, saved):
+                raise HTTPException(409, "Recalculate Final Gemstones before downloading the report.")
+            if not saved.get("gem_count"):
+                raise HTTPException(409, "This run has no final gemstone plan to report.")
+            try:
+                path = final_gem_report_path(job, run)
+            except (OSError, ValueError, RuntimeError) as exc:
+                logger.exception("Final gemstone report failed for %s", job.name)
+                raise HTTPException(503, public_error(exc))
+            return FileResponse(path, media_type="application/pdf",
+                                filename=f"quartz-final-gemstones-{job.name}-{run.name[:8]}.pdf")
+
     return router
+
+
+def _is_stale(job, saved):
+    """Backend-authoritative: confirmed defects, mesh or rough weight changed."""
+    try:
+        weight, mesh_path, _ = passed_reconstruction(job)
+        return (constraint_hash(review(job)) != saved["defect_review_sha256"] or
+                sha256(mesh_path) != saved["input_manifest"]["mesh_sha256"] or
+                weight != saved["rough_weight_ct"])
+    except (ValueError, OSError, KeyError, TypeError):
+        return True
+
+
+def final_gem_report_path(job, run):
+    """The run's own report, regenerated only when its result.json changes.
+
+    Cached inside the run directory, so each run keeps its own report and a
+    report for one run is never served for another.
+    """
+    result_path = run / "result.json"
+    result_hash = sha256(result_path)
+    pdf_path = run / REPORT_FILENAME
+    cache_path = run / REPORT_CACHE_FILENAME
+    expected = {"result_sha256": result_hash, "version": REPORT_VERSION}
+    if read_json(cache_path, {}) == expected and is_valid_pdf(pdf_path):
+        return pdf_path
+    saved = read_json(result_path)
+    temporary = run / f"{REPORT_FILENAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        create_final_gem_pdf(saved, temporary, job_id=job.name, run_id=run.name, result_sha256=result_hash)
+        if not is_valid_pdf(temporary):
+            raise RuntimeError("Final gemstone report generation produced an invalid PDF.")
+        os.replace(temporary, pdf_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    atomic_json(cache_path, expected)
+    return pdf_path
